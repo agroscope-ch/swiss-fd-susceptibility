@@ -1,0 +1,721 @@
+---
+title: "Probability of plant infection depending on cultivar under controlled conditions"
+author: "Jasmine Cadena"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: source
+---
+
+# Analysis overview
+
+This document reproduces the analysis of plant infection probability in the controlled transmission experiment.
+
+
+# Software and packages
+
+```{r}
+#| label: setup
+
+if (getRversion() < "4.5.2") {
+  warning(
+    "This analysis was developed using R 4.5.2. Results should be checked when using an older R version."
+  )
+}
+
+required_packages <- c(
+  "glmmTMB",
+  "DHARMa",
+  "emmeans",
+  "dplyr",
+  "ggplot2",
+  "scales",
+  "knitr"
+)
+
+missing_packages <- required_packages[
+  !vapply(
+    required_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    paste0(
+      "The following R packages are required but not installed: ",
+      paste(missing_packages, collapse = ", "),
+      ". Install them with install.packages() before rendering this document."
+    )
+  )
+}
+
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(knitr)
+
+dir.create("figures", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+```
+
+# Data import and preparation
+
+## Data import
+
+```{r}
+#| label: data-import
+
+lab_incidence <- read.csv2(
+  "https://zenodo.org/records/21885421/files/lab_incidence.csv?download=1",
+  stringsAsFactors = FALSE
+)
+
+str(lab_incidence)
+```
+
+## Data preparation
+
+The dataset contains only inoculated plants with at least one infected insect. The number of infected insects is calculated as the sum of infected insects recovered alive and dead.
+
+
+```{r}
+#| label: data-preparation
+
+analysis_data <- lab_incidence |>
+  dplyr::mutate(
+    infected_insects = alive_infected + dead_infected,
+    cultivar = factor(
+      cultivar,
+      levels = c("ME", "PN", "CH", "GY", "GM", "CR", "CS")
+    ),
+    session = factor(session)
+  )
+
+str(analysis_data)
+```
+
+# Descriptive statistics
+
+```{r}
+#| label: descriptive-summary
+
+sample_sizes <- analysis_data |>
+  group_by(cultivar) |>
+  summarise(
+    infected_plants = sum(infection),
+    exposed_plants = n(),
+    observed_infection_percentage = 100 * mean(infection),
+    median_infected_insects = median(infected_insects),
+    minimum_infected_insects = min(infected_insects),
+    maximum_infected_insects = max(infected_insects),
+    .groups = "drop"
+  )
+
+knitr::kable(
+  sample_sizes,
+  digits = 1,
+  col.names = c(
+    "Cultivar",
+    "Infected plants",
+    "Exposed plants",
+    "Observed infection (%)",
+    "Median infected insects",
+    "Minimum infected insects",
+    "Maximum infected insects"
+  )
+)
+```
+
+# Link-function selection
+
+The binomial response family is determined by the binary infection outcome. Alternative link functions are compared before selecting the model structure and explanatory terms.
+
+Binomial models with logit, probit and complementary log-log links are fitted using the same model structure. The logarithm of the number of infected insects is included as an offset, fixing its coefficient to one.
+
+```{r}
+#| label: link-models
+
+model_logit <- glmmTMB(
+  infection ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = binomial(link = "logit")
+)
+
+model_probit <- glmmTMB(
+  infection ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = binomial(link = "probit")
+)
+
+model_cloglog <- glmmTMB(
+  infection ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = binomial(link = "cloglog")
+)
+
+link_comparison <- AIC(
+  model_logit,
+  model_probit,
+  model_cloglog
+)
+
+link_comparison$delta_AIC <-
+  link_comparison$AIC - min(link_comparison$AIC)
+
+knitr::kable(link_comparison, digits = 2)
+```
+
+## Residual diagnostics for the logit model
+
+```{r}
+#| label: diagnostics-logit
+#| fig-cap: "DHARMa residual diagnostics for the binomial model with a logit link."
+
+set.seed(123)
+sim_logit <- simulateResiduals(model_logit, n = 1000)
+plot(sim_logit)
+testUniformity(sim_logit)
+testDispersion(sim_logit)
+testOutliers(sim_logit)
+```
+
+## Residual diagnostics for the probit model
+
+```{r}
+#| label: diagnostics-probit
+#| fig-cap: "DHARMa residual diagnostics for the binomial model with a probit link."
+
+set.seed(123)
+sim_probit <- simulateResiduals(model_probit, n = 1000)
+plot(sim_probit)
+testUniformity(sim_probit)
+testDispersion(sim_probit)
+testOutliers(sim_probit)
+```
+
+## Residual diagnostics for the complementary log-log model
+
+```{r}
+#| label: diagnostics-cloglog
+#| fig-cap: "DHARMa residual diagnostics for the binomial model with a complementary log-log link."
+
+set.seed(123)
+sim_cloglog <- simulateResiduals(model_cloglog, n = 1000)
+plot(sim_cloglog)
+testUniformity(sim_cloglog)
+testDispersion(sim_cloglog)
+testOutliers(sim_cloglog)
+```
+
+The complementary log-log link was retained based on model fit and its biological suitability for an infection process associated with cumulative exposure to infected insects.
+
+# Model structure and term selection
+
+After selecting the link function, the exposure term and inoculation-session structure are evaluated. These comparisons determine the structure used for the final model.
+
+## Inoculation session
+
+Inoculation session represents the experimental block in which a subset of cultivars was exposed simultaneously to the same batch of infectious insects. It is evaluated as both a random intercept and a fixed blocking factor.
+
+### Session as a random intercept
+
+```{r}
+#| label: session-random
+
+model_session_random <- glmmTMB(
+  infection ~ cultivar +
+    offset(log(infected_insects)) +
+    (1 | session),
+  data = analysis_data,
+  family = binomial(link = "cloglog")
+)
+
+VarCorr(model_session_random)
+```
+
+### Session as a fixed blocking factor
+
+```{r}
+#| label: session-fixed
+
+model_session_fixed <- glmmTMB(
+  infection ~ cultivar +
+    session +
+    offset(log(infected_insects)),
+  data = analysis_data,
+  family = binomial(link = "cloglog")
+)
+
+AIC(
+  model_cloglog,
+  model_session_random,
+  model_session_fixed
+)
+
+anova(
+  model_cloglog,
+  model_session_fixed,
+  test = "Chisq"
+)
+```
+
+The variance associated with session as a random intercept was negligible, and including session as a fixed blocking factor did not improve model fit. Session was therefore not retained in the final model.
+
+## Exposure term: offset versus freely estimated slope
+
+The offset formulation fixes the coefficient of log(infected_insects) to one by definition. This model is compared with a model in which the coefficient is estimated freely and with a model including an interaction between cultivar and exposure.
+
+```{r}
+#| label: exposure-models
+
+model_free_slope <- glmmTMB(
+  infection ~ cultivar + log(infected_insects),
+  data = analysis_data,
+  family = binomial(link = "cloglog")
+)
+
+model_exposure_interaction <- glmmTMB(
+  infection ~ cultivar * log(infected_insects),
+  data = analysis_data,
+  family = binomial(link = "cloglog")
+)
+
+AIC(
+  model_cloglog,
+  model_free_slope,
+  model_exposure_interaction
+)
+
+anova(
+  model_cloglog,
+  model_free_slope,
+  test = "Chisq"
+)
+
+anova(
+  model_free_slope,
+  model_exposure_interaction,
+  test = "Chisq"
+)
+```
+
+Estimating the exposure coefficient freely did not improve model fit, and there was no evidence that the relationship between exposure and infection differed among cultivars. The more parsimonious offset formulation was therefore retained.
+
+# Final model
+
+The final model uses the complementary log-log link, includes cultivar as the explanatory variable and uses the logarithm of the number of infected insects as an offset.
+
+```{r}
+#| label: final-model
+
+model_final <- glmmTMB(
+  infection ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = binomial(link = "cloglog")
+)
+
+summary(model_final)
+```
+
+# Final model diagnostics
+
+```{r}
+#| label: final-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the final binomial model."
+
+set.seed(123)
+sim_final <- simulateResiduals(model_final, n = 1000)
+plot(sim_final)
+testUniformity(sim_final)
+testDispersion(sim_final)
+testOutliers(sim_final)
+```
+
+```{r}
+#| label: residuals-by-cultivar
+#| fig-cap: "Scaled residuals according to grapevine cultivar."
+
+plotResiduals(
+  sim_final,
+  form = analysis_data$cultivar
+)
+```
+
+```{r}
+#| label: residuals-by-exposure
+#| fig-cap: "Scaled residuals according to the number of infected insects recovered per plant."
+
+plotResiduals(
+  sim_final,
+  form = analysis_data$infected_insects
+)
+```
+
+# Statistical inference
+
+Inference is performed only after the final model structure has been selected and its residual diagnostics have been examined.
+
+## Global likelihood-ratio test for cultivar
+
+The global cultivar effect is evaluated by comparing the final model with a nested model lacking the cultivar term.
+
+```{r}
+#| label: cultivar-lrt
+
+model_without_cultivar <- glmmTMB(
+  infection ~ offset(log(infected_insects)),
+  data = analysis_data,
+  family = binomial(link = "cloglog")
+)
+
+anova(
+  model_without_cultivar,
+  model_final,
+  test = "Chisq"
+)
+```
+
+## Estimated marginal means
+
+Cultivar-specific infection probabilities are estimated at a standardised exposure of four infected insects per plant.
+
+```{r}
+#| label: estimated-probabilities
+
+estimated_probabilities <- emmeans(
+  model_final,
+  ~ cultivar,
+  at = list(infected_insects = 4),
+  type = "response"
+)
+
+estimated_probabilities
+```
+
+## Dunnett-adjusted comparisons against Merlot
+
+Estimated marginal means are first regridded to the response scale so that contrasts represent absolute differences in infection probability. Comparisons with the reference cultivar (Merlot) are first calculated without multiplicity adjustment, and then repeated using Dunnett adjustment to obtain adjusted P values for inference.
+
+```{r}
+#| label: merlot-contrasts
+
+estimated_probabilities_response <- regrid(
+  estimated_probabilities
+)
+
+contrasts_merlot_raw <- contrast(
+  estimated_probabilities_response,
+  method = "trt.vs.ctrl",
+  ref = "ME",
+  adjust = "none"
+)
+
+contrasts_merlot_dunnett <- contrast(
+  estimated_probabilities_response,
+  method = "trt.vs.ctrl",
+  ref = "ME",
+  adjust = "dunnettx"
+)
+
+contrasts_merlot_raw
+contrasts_merlot_dunnett
+```
+
+# Exported tables
+
+## Table S2A
+
+
+```{r}
+#| label: table-s2a
+
+model_summary <- summary(model_final)$coefficients$cond
+
+table_S2A <- as.data.frame(model_summary)
+
+table_S2A$Parameter <- rownames(table_S2A)
+
+rownames(table_S2A) <- NULL
+
+table_S2A <- table_S2A |>
+  dplyr::transmute(
+    Parameter = dplyr::recode(
+      Parameter,
+      "(Intercept)" = "Intercept (Merlot)",
+      "cultivarCH" = "Chasselas",
+      "cultivarCR" = "Chardonnay",
+      "cultivarCS" = "Cabernet Sauvignon",
+      "cultivarGM" = "Gamaret",
+      "cultivarGY" = "Gamay",
+      "cultivarPN" = "Pinot Noir"
+    ),
+    Estimate = Estimate,
+    SE = `Std. Error`,
+    z = `z value`,
+    P = `Pr(>|z|)`
+  )
+
+table_S2A <- table_S2A |>
+  dplyr::mutate(
+    Estimate = round(Estimate, 4),
+    SE = round(SE, 4),
+    z = round(z, 3),
+    P = dplyr::case_when(
+      P < 0.001 ~ "<0.001",
+      TRUE ~ sprintf("%.3f", P)
+    )
+  )
+
+write.csv(
+  table_S2A,
+  "tables/Table S2A.csv",
+  row.names = FALSE,
+  na = "",
+  fileEncoding = "UTF-8"
+)
+
+knitr::kable(
+  table_S2A,
+  align = c("l", "r", "r", "r", "r"),
+  col.names = c(
+    "Parameter",
+    "Estimate",
+    "SE",
+    "z",
+    "P"
+  ),
+  caption = "Parameter estimates of the final complementary log-log binomial model used to analyse the probability of plant infection following controlled insect-mediated inoculation. Merlot was used as the reference cultivar. Estimates are reported on the complementary log-log scale."
+)
+```
+
+
+## Table S2B
+
+```{r}
+#| label: Table S2B
+
+probability_table <- as.data.frame(
+  estimated_probabilities
+) |>
+  transmute(
+    cultivar = as.character(cultivar),
+    estimated_probability = prob,
+    lower_95_ci = asymp.LCL,
+    upper_95_ci = asymp.UCL
+  )
+
+adjusted_contrast_table <- as.data.frame(
+  contrasts_merlot_dunnett
+) |>
+  transmute(
+    cultivar = sub(" - ME", "", contrast),
+    probability_difference_vs_merlot = estimate,
+    dunnett_p_value = p.value
+  )
+
+results_table <- probability_table |>
+  left_join(
+    adjusted_contrast_table,
+    by = "cultivar"
+  ) |>
+  left_join(
+    sample_sizes |>
+      mutate(cultivar = as.character(cultivar)) |>
+      dplyr::select(
+        cultivar,
+        infected_plants,
+        exposed_plants
+      ),
+    by = "cultivar"
+  ) |>
+  mutate(
+    cultivar_name = recode(
+      cultivar,
+      "CH" = "Chasselas",
+      "PN" = "Pinot Noir",
+      "ME" = "Merlot",
+      "CR" = "Chardonnay",
+      "GM" = "Gamaret",
+      "GY" = "Gamay",
+      "CS" = "Cabernet Sauvignon"
+    ),
+    probability_difference_vs_merlot = ifelse(
+      cultivar == "ME",
+      NA_real_,
+      probability_difference_vs_merlot
+    ),
+    dunnett_p_value = ifelse(
+      cultivar == "ME",
+      NA_real_,
+      dunnett_p_value
+    )
+  ) |>
+  arrange(estimated_probability)
+
+export_table <- results_table |>
+  transmute(
+    Cultivar = cultivar_name,
+    `Infected / exposed plants` = paste0(
+      infected_plants,
+      " / ",
+      exposed_plants
+    ),
+    `Infection probability (%)` =
+      100 * estimated_probability,
+    `Lower 95% CI` = 100 * lower_95_ci,
+    `Upper 95% CI` = 100 * upper_95_ci,
+    `Delta P vs Merlot (percentage points)` =
+      100 * probability_difference_vs_merlot,
+    `Dunnett-adjusted p-value vs Merlot` =
+      dunnett_p_value
+  )
+
+write.csv(
+  export_table,
+  "tables/Table S2B.csv",
+  row.names = FALSE,
+  na = "",
+  fileEncoding = "UTF-8"
+)
+
+knitr::kable(
+  export_table,
+  digits = 2
+)
+```
+
+# Figures
+
+## Estimated infection probability
+
+Letters summarise the planned comparisons against Merlot. Cultivars sharing a letter with Merlot are not significantly different from Merlot after Dunnett adjustment. These letters are not a complete compact-letter display of every pairwise cultivar comparison.
+
+```{r}
+#| label: figure-2
+#| fig-cap: "Estimated disease incidence at 16 weeks following exposure to four infectious insects per plant. Points represent estimated probabilities (± 95% confidence intervals). Letters indicate significant differences from Merlot based on targeted Dunnett-adjusted contrasts (α = 0.05). Numbers indicate the number of infected grapevines out of the number of exposed grapevines per cultivar."
+#| fig-width: 7.01
+#| fig-height: 4.33
+
+figure_data <- results_table |>
+  mutate(
+    comparison_group = case_when(
+      cultivar == "ME" ~ "a",
+      !is.na(dunnett_p_value) & dunnett_p_value < 0.05 ~ "b",
+      TRUE ~ "ab"
+    ),
+    cultivar_name = factor(
+      cultivar_name,
+      levels = cultivar_name
+    ),
+    letter_y = upper_95_ci + 0.045,
+    sample_y = 0.03,
+    infected_exposed = paste0(
+      infected_plants,
+      " / ",
+      exposed_plants
+    )
+  )
+
+figure_2 <- ggplot(
+  figure_data,
+  aes(
+    x = cultivar_name,
+    y = estimated_probability,
+    colour = cultivar_name
+  )
+) +
+  geom_errorbar(
+    aes(
+      ymin = lower_95_ci,
+      ymax = upper_95_ci
+    ),
+    width = 0.08,
+    linewidth = 0.6
+  ) +
+  geom_point(size = 3.4) +
+  geom_text(
+    aes(
+      y = letter_y,
+      label = comparison_group
+    ),
+    colour = "black",
+    size = 4
+  ) +
+  geom_text(
+    aes(
+      y = sample_y,
+      label = infected_exposed
+    ),
+    colour = "black",
+    size = 3
+  ) +
+  scale_colour_manual(
+    values = c(
+      "Chasselas" = "#FCDF77",
+      "Pinot Noir" = "#DF8ADB",
+      "Merlot" = "#B0C4DE",
+      "Chardonnay" = "#A6D854",
+      "Gamaret" = "#5B9BD5",
+      "Gamay" = "#F8766D",
+      "Cabernet Sauvignon" = "#F4A32C"
+    ),
+    guide = "none"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1.08),
+    breaks = seq(0, 1, 0.2),
+    labels = percent_format(accuracy = 1)
+  ) +
+  labs(
+    x = "Cultivar",
+    y = "Estimated probability of plant infection"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.title = element_text(colour = "black"),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      colour = "black"
+    ),
+    axis.text.y = element_text(colour = "black"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = element_rect(
+      fill = "white",
+      colour = NA
+    )
+  )
+
+figure_2
+
+ggsave(
+  filename = "figures/Figure 2.tiff",
+  plot = figure_2,
+  width = 178,
+  height = 110,
+  units = "mm",
+  dpi = 600,
+  bg = "white"
+)
+```
+
