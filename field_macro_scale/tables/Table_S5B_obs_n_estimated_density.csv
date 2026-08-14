@@ -1,0 +1,6 @@
+"Cultivar","Surface (ha)","FD+","Observed FD+ ha-1","Estimated FD+ ha-1 (95% CI)","Statistical group"
+"Sylvaner",205,7,"0.03","0.03 (95% CI: 0.01-0.08)","a"
+"Arvine",171,15,"0.09","0.15 (95% CI: 0.07-0.28)","ab"
+"Chasselas",1452,518,"0.36","0.27 (95% CI: 0.22-0.33)","b"
+"Pinot Noir",1000,4175,"4.18","2.56 (95% CI: 2.11-3.10)","c"
+"Gamay",375,3408,"9.08","5.29 (95% CI: 4.08-6.85)","d"
