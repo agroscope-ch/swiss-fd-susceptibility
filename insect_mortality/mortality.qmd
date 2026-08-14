@@ -1,0 +1,1001 @@
+---
+title: "Insect mortality across grapevine cultivars"
+author: "Jasmine Cadena"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: source
+---
+
+# Analysis overview
+
+This document reproduces the analysis of insect mortality in the controlled transmission experiment.
+
+
+# Software and packages
+
+```{r}
+#| label: setup
+
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(knitr)
+
+dir.create("figures", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+```
+
+# Data import and preparation
+
+## Data import
+
+```{r}
+#| label: data-import
+
+mortality_data <- read.csv2(
+  "https://zenodo.org/records/21885421/files/mortality.csv?download=1.csv",
+  stringsAsFactors = FALSE
+)
+```
+
+## Data preparation
+
+The public dataset contains one row per plant and separate counts for infected and healthy insects that were alive or dead. These four count columns are converted to a long format so that insect infection status can be evaluated during model selection. 
+
+Chasselas, the control treatment and healthy insect status are set as the reference levels.
+
+```{r}
+#| label: data-preparation
+
+analysis_data <- mortality_data |>
+  tidyr::pivot_longer(
+    cols = c(
+      alive_infected,
+      dead_infected,
+      alive_healthy,
+      dead_healthy
+    ),
+    names_to = c(".value", "insect_status"),
+    names_pattern = "(alive|dead)_(infected|healthy)"
+  ) |>
+  dplyr::mutate(
+    plant_id = factor(plant_id),
+    cultivar = factor(
+      cultivar,
+      levels = c("CH", "CR", "CS", "GM", "GY", "ME", "PN")
+    ),
+    treatment = factor(
+      treatment,
+      levels = c("ctrl", "ttt")
+    ),
+    session = factor(session),
+    insect_status = factor(
+      insect_status,
+      levels = c("healthy", "infected")
+    ),
+    total = dead + alive
+  )
+```
+
+# Family selection
+
+The response is a grouped binomial outcome consisting of the number of dead insects relative to the total number of dead and surviving insects. A binomial model is therefore used.
+
+## Binomial model
+
+```{r}
+#| label: binomial-model
+
+model_binomial <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    insect_status +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+```
+
+## Residual diagnostics 
+
+```{r}
+#| label: diagnostics-binomial
+#| fig-cap: "DHARMa residual diagnostics for the binomial mortality model."
+
+set.seed(123)
+
+sim_binomial <- simulateResiduals(
+  fittedModel = model_binomial,
+  n = 1000
+)
+
+plot(sim_binomial)
+
+testUniformity(sim_binomial)
+
+testDispersion(sim_binomial)
+
+testOutliers(sim_binomial)
+```
+
+
+Residual diagnostics indicate no evidence that the assumptions of the binomial model are violated. The binomial family is therefore retained for subsequent analyses.
+
+# Model structure and term selection
+
+## Fixed-effect estimability
+
+Control plants contain only healthy insects, whereas inoculated plants may contain both healthy and infected insects. Consequently, treatment and insect status are not fully crossed. The design matrix is therefore examined to confirm that this incomplete design does not prevent estimation of the planned model coefficients.
+
+```{r}
+#| label: design-matrix
+
+mortality_design_matrix <- model.matrix(
+  ~ cultivar * treatment + insect_status,
+  data = analysis_data
+)
+
+c(
+  rank = qr(mortality_design_matrix)$rank,
+  columns = ncol(mortality_design_matrix),
+  full_rank = qr(mortality_design_matrix)$rank ==
+    ncol(mortality_design_matrix)
+)
+```
+
+The design matrix is full rank (15/15), indicating that all coefficients of the planned additive model are estimable despite the incomplete crossing between treatment and insect status.
+
+## Random-effect structure
+
+Plant identity and experimental session represent two potential sources of non-independence. A plant may contribute mortality observations for both healthy and infected insects, while insects from the same experimental session share common experimental conditions. The random-effect structure is therefore evaluated before fixed-effect selection while keeping the fixed-effect structure unchanged.
+
+```{r}
+#| label: random-effect-structure
+
+# No random effect
+model_random_none <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    insect_status,
+  data = analysis_data,
+  family = binomial()
+)
+
+# Plant-level random intercept
+model_random_plant <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    insect_status +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+
+# Session-level random intercept
+model_random_session <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    insect_status +
+    (1 | session),
+  data = analysis_data,
+  family = binomial()
+)
+
+# Plant-level and session-level random intercepts
+model_random_plant_session <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    insect_status +
+    (1 | plant_id) +
+    (1 | session),
+  data = analysis_data,
+  family = binomial()
+)
+
+VarCorr(model_random_plant)
+VarCorr(model_random_session)
+VarCorr(model_random_plant_session)
+
+AIC(
+  model_random_none,
+  model_random_plant,
+  model_random_session,
+  model_random_plant_session
+)
+```
+
+Both plant identity and experimental session account for substantial variation in mortality. The model including random intercepts for both plant identity and experimental session has the lowest AIC and is substantially better supported than models containing either random effect alone or no random effect. Both random intercepts are therefore retained for subsequent fixed-effect selection.
+
+## Cultivar by treatment interaction
+
+The cultivar × treatment interaction is evaluated while retaining the plant- and session-level random intercepts.
+
+```{r}
+#| label: cultivar-treatment-interaction
+
+model_additive_random <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    insect_status +
+    (1 | plant_id) +
+    (1 | session),
+  data = analysis_data,
+  family = binomial()
+)
+
+model_cultivar_treatment_random <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar * treatment +
+    insect_status +
+    (1 | plant_id) +
+    (1 | session),
+  data = analysis_data,
+  family = binomial()
+)
+
+lrt_cultivar_treatment <- anova(
+  model_additive_random,
+  model_cultivar_treatment_random
+)
+
+lrt_cultivar_treatment
+
+AIC(
+  model_additive_random,
+  model_cultivar_treatment_random
+)
+```
+
+The cultivar × treatment interaction is not retained because it is not supported by the likelihood-ratio test or AIC.
+
+## Cultivar by insect-status interaction
+
+The cultivar × insect status interaction is evaluated using the same random-effect structure.
+
+```{r}
+#| label: cultivar-insect-status-interaction
+
+model_cultivar_insect_random <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar * insect_status +
+    treatment +
+    (1 | plant_id) +
+    (1 | session),
+  data = analysis_data,
+  family = binomial()
+)
+
+lrt_cultivar_insect_status <- anova(
+  model_additive_random,
+  model_cultivar_insect_random
+)
+
+lrt_cultivar_insect_status
+
+AIC(
+  model_additive_random,
+  model_cultivar_insect_random
+)
+```
+
+The cultivar × insect status interaction is not retained because it is not supported by the likelihood-ratio test or AIC.
+
+## Insect-status effect
+
+Because the cultivar × treatment and cultivar × insect status interactions tested above are not supported, insect status is subsequently evaluated as an additive fixed effect.
+
+```{r}
+#| label: insect-status-effect
+
+model_without_insect_status_random <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    (1 | plant_id) +
+    (1 | session),
+  data = analysis_data,
+  family = binomial()
+)
+
+lrt_insect_status <- anova(
+  model_without_insect_status_random,
+  model_additive_random
+)
+
+lrt_insect_status
+
+AIC(
+  model_without_insect_status_random,
+  model_additive_random
+)
+```
+
+Insect status is not retained because its addition does not improve the model according to the likelihood-ratio test or AIC.
+
+
+## Experimental session: random versus fixed effect
+
+Experimental session is finally evaluated as either a random intercept or a fixed blocking factor using the same fixed-effect structure.
+
+```{r}
+#| label: session-random-vs-fixed
+
+model_session_random_final <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    (1 | plant_id) +
+    (1 | session),
+  data = analysis_data,
+  family = binomial()
+)
+
+model_session_fixed_final <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    session +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+
+VarCorr(model_session_random_final)
+
+AIC(
+  model_session_random_final,
+  model_session_fixed_final
+)
+
+```
+
+Experimental session accounts for substantial variation in mortality when modeled as a random intercept. However, treating session as a fixed blocking factor results in a substantially lower AIC than treating it as a random effect. Session is therefore retained as a fixed blocking factor, while plant identity is retained as a random intercept in the final model.
+
+## Plant-level random intercept in the final session structure
+
+Plant identity is reassessed after experimental session is retained as a fixed blocking factor.
+
+```{r}
+#| label: plant-random-effect-final
+
+model_session_fixed_no_plant <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    session,
+  data = analysis_data,
+  family = binomial()
+)
+
+model_session_fixed_with_plant <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    session +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+
+VarCorr(model_session_fixed_with_plant)
+
+AIC(
+  model_session_fixed_no_plant,
+  model_session_fixed_with_plant
+)
+```
+
+Plant identity accounts for substantial variation in mortality and its inclusion as a random intercept substantially improves model support according to AIC. Plant identity is therefore retained as a random intercept in the final model.
+
+# Final model
+
+The final model contains additive fixed effects of cultivar, treatment and experimental session, with plant identity retained as a random intercept. It uses a binomial response distribution.
+
+```{r}
+#| label: final-model
+
+model_final <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    session +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+
+summary(model_final)
+AIC(model_final)
+```
+
+# Final model diagnostics
+
+```{r}
+#| label: final-model-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the final binomial mortality model."
+
+set.seed(123)
+
+sim_final <- simulateResiduals(
+  fittedModel = model_final,
+  n = 1000
+)
+
+plot(sim_final)
+
+testUniformity(sim_final)
+testDispersion(sim_final)
+testOutliers(sim_final)
+```
+
+The DHARMa residual diagnostics show no evidence of significant deviations from the assumptions of the binomial model, including no evidence of residual overdispersion. The binomial model is therefore retained as the final model.
+
+# Statistical inference
+
+The global contributions of cultivar, treatment and experimental session are evaluated by likelihood-ratio tests. Each reduced model differs from the final model only by removal of the fixed effect being tested, while the plant-level random intercept is retained.
+
+## Global cultivar effect
+
+```{r}
+#| label: global-cultivar-effect
+
+model_without_cultivar <- glmmTMB(
+  cbind(dead, alive) ~
+    treatment +
+    session +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+
+lrt_cultivar <- anova(
+  model_without_cultivar,
+  model_final
+)
+
+lrt_cultivar
+```
+
+## Treatment effect
+
+```{r}
+#| label: treatment-effect
+
+model_without_treatment <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    session +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+
+lrt_treatment <- anova(
+  model_without_treatment,
+  model_final
+)
+
+lrt_treatment
+```
+
+## Session effect
+
+```{r}
+#| label: final-session-effect
+
+model_without_session <- glmmTMB(
+  cbind(dead, alive) ~
+    cultivar +
+    treatment +
+    (1 | plant_id),
+  data = analysis_data,
+  family = binomial()
+)
+
+lrt_session_final <- anova(
+  model_without_session,
+  model_final
+)
+
+lrt_session_final
+```
+
+# Estimated marginal means and contrasts
+
+Model-based mortality probabilities are estimated for each cultivar on the response scale, averaging over treatment and session. Planned comparisons against Merlot use Dunnett adjustment. The targeted Pinot Noir versus Chasselas contrast is retained as an unadjusted planned comparison.
+
+```{r}
+#| label: estimated-marginal-means
+
+emm_cultivar <- emmeans(
+  model_final,
+  ~ cultivar,
+  type = "response"
+)
+
+emm_cultivar
+
+emm_cultivar_table <- as.data.frame(emm_cultivar) |>
+  dplyr::mutate(
+    Cultivar = dplyr::recode(
+      cultivar,
+      "CH" = "Chasselas",
+      "CR" = "Chardonnay",
+      "CS" = "Cabernet Sauvignon",
+      "GM" = "Gamaret",
+      "GY" = "Gamay",
+      "ME" = "Merlot",
+      "PN" = "Pinot Noir"
+    ),
+    `Estimated mortality (%)` = sprintf("%.1f", 100 * prob),
+    `95% CI` = sprintf(
+      "%.1f-%.1f",
+      100 * asymp.LCL,
+      100 * asymp.UCL
+    )
+  ) |>
+  dplyr::select(
+    Cultivar,
+    `Estimated mortality (%)`,
+    `95% CI`
+  )
+
+knitr::kable(
+  emm_cultivar_table,
+  align = c("l", "r", "c")
+)
+```
+
+## Dunnett-adjusted contrasts against Merlot
+
+```{r}
+#| label: dunnett-contrasts
+
+contrast_merlot <- contrast(
+  emm_cultivar,
+  method = "trt.vs.ctrl",
+  ref = "ME",
+  adjust = "dunnett"
+)
+
+summary(
+  contrast_merlot,
+  infer = TRUE
+)
+```
+
+## Targeted Pinot Noir versus Chasselas contrast
+
+```{r}
+#| label: pinot-noir-chasselas-contrast
+
+contrast_pinot_chasselas <- contrast(
+  emm_cultivar,
+  method = list(
+    "Pinot Noir - Chasselas" = c(
+      CH = -1,
+      CR = 0,
+      CS = 0,
+      GM = 0,
+      GY = 0,
+      ME = 0,
+      PN = 1
+    )
+  ),
+  adjust = "none"
+)
+
+summary(
+  contrast_pinot_chasselas,
+  infer = TRUE
+)
+```
+
+# Figure
+
+```{r}
+#| label: mortality-figure
+#| fig-cap: "Figure 5. Estimated probability of insect mortality across grapevine cultivars. Points represent model-estimated mortality probabilities (± 95% confidence intervals). Different letters indicate cultivars that differ significantly from the reference cultivar Merlot based on Dunnett-adjusted contrasts (p < 0.05). Sample sizes (n = total number of insects) are shown for each cultivar."
+
+cultivar_labels <- c(
+  "CH" = "Chasselas",
+  "PN" = "Pinot Noir",
+  "ME" = "Merlot",
+  "GY" = "Gamay",
+  "GM" = "Gamaret",
+  "CR" = "Chardonnay",
+  "CS" = "Cabernet Sauvignon"
+)
+
+cultivar_colors <- c(
+  "Chasselas" = "#FCDF77",
+  "Pinot Noir" = "#DF8ADB",
+  "Merlot" = "#B0C4DE",
+  "Chardonnay" = "#A6D854",
+  "Gamaret" = "#5B9BD5",
+  "Gamay" = "#F8766D",
+  "Cabernet Sauvignon" = "#F4A32C"
+)
+
+cultivar_order <- c(
+  "Merlot",
+  "Pinot Noir",
+  "Chasselas",
+  "Gamay",
+  "Gamaret",
+  "Chardonnay",
+  "Cabernet Sauvignon"
+)
+
+emm_plot <- as.data.frame(emm_cultivar) |>
+  rename(
+    estimated_probability = prob,
+    lower_CI = asymp.LCL,
+    upper_CI = asymp.UCL
+  ) |>
+  mutate(
+    cultivar = recode(cultivar, !!!cultivar_labels),
+    cultivar = factor(cultivar, levels = cultivar_order)
+  )
+
+contrast_plot <- as.data.frame(
+  summary(
+    contrast_merlot,
+    infer = TRUE
+  )
+) |>
+  mutate(
+    cultivar = sub(" / ME", "", contrast),
+    cultivar = recode(cultivar, !!!cultivar_labels),
+    letter = if_else(p.value < 0.05, "b", "a")
+  ) |>
+  dplyr::select(cultivar, letter) |>
+  bind_rows(
+    data.frame(
+      cultivar = "Merlot",
+      letter = "a"
+    )
+  ) |>
+  mutate(
+    cultivar = factor(cultivar, levels = cultivar_order)
+  )
+
+sample_sizes <- analysis_data |>
+  group_by(cultivar) |>
+  summarise(
+    n = sum(total),
+    .groups = "drop"
+  ) |>
+  mutate(
+    cultivar = recode(cultivar, !!!cultivar_labels),
+    cultivar = factor(cultivar, levels = cultivar_order),
+    label = paste0("n = ", n)
+  )
+
+letter_positions <- emm_plot |>
+  left_join(
+    contrast_plot,
+    by = "cultivar"
+  ) |>
+  mutate(
+    y = upper_CI + 0.04
+  )
+
+plot_mortality <- ggplot(
+  emm_plot,
+  aes(
+    x = cultivar,
+    y = estimated_probability,
+    colour = cultivar
+  )
+) +
+  geom_errorbar(
+    aes(
+      ymin = lower_CI,
+      ymax = upper_CI
+    ),
+    width = 0.08,
+    linewidth = 0.6
+  ) +
+  geom_point(size = 3.4) +
+  geom_text(
+    data = letter_positions,
+    aes(
+      x = cultivar,
+      y = y,
+      label = letter
+    ),
+    inherit.aes = FALSE,
+    colour = "black",
+    size = 3.8,
+    family = "Arial"
+  ) +
+  geom_text(
+    data = sample_sizes,
+    aes(
+      x = cultivar,
+      y = 0.24,
+      label = label
+    ),
+    inherit.aes = FALSE,
+    colour = "black",
+    size = 3.0,
+    family = "Arial"
+  ) +
+  scale_colour_manual(
+    values = cultivar_colors,
+    guide = "none"
+  ) +
+  scale_y_continuous(
+    limits = c(0.22, 0.90),
+    breaks = seq(0.3, 0.9, 0.1),
+    labels = percent_format(accuracy = 1)
+  ) +
+  labs(
+    x = NULL,
+    y = "Estimated mortality probability"
+  ) +
+  theme_minimal(
+    base_size = 10,
+    base_family = "Arial"
+  ) +
+  theme(
+    axis.title.y = element_text(
+      size = 11,
+      colour = "black",
+      margin = margin(r = 10)
+    ),
+    axis.text.x = element_text(
+      size = 9,
+      colour = "black",
+      angle = 45,
+      hjust = 1,
+      vjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 9,
+      colour = "black"
+    ),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(
+      colour = "grey88",
+      linewidth = 0.4
+    ),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.margin = margin(10, 12, 12, 12)
+  )
+
+plot_mortality
+
+ggsave(
+  filename = "figures/Figure_5.tiff",
+  plot = plot_mortality,
+  device = "tiff",
+  width = 178,
+  height = 110,
+  units = "mm",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+
+```
+
+# Exported tables
+
+## Table S4A: parameter estimates of the final model
+
+Table S4A reports parameter estimates from the final binomial model used
+to analyse insect mortality. Chasselas, the control treatment and session
+S02 were used as the reference levels. Estimates are reported on the
+logit scale.
+
+```{r}
+#| label: table-s4a
+
+coefficient_table <- as.data.frame(
+  summary(model_final)$coefficients$cond
+)
+
+coefficient_table$term <- row.names(coefficient_table)
+
+table_S4A <- coefficient_table |>
+  dplyr::transmute(
+    Parameter = dplyr::recode(
+      term,
+      "(Intercept)" = "Intercept (Chasselas, control, session S02)",
+      "cultivarCR" = "Chardonnay",
+      "cultivarCS" = "Cabernet Sauvignon",
+      "cultivarGM" = "Gamaret",
+      "cultivarGY" = "Gamay",
+      "cultivarME" = "Merlot",
+      "cultivarPN" = "Pinot Noir",
+      "treatmentttt" = "Inoculated treatment",
+      "sessionS03" = "Session S03",
+      "sessionS04" = "Session S04",
+      "sessionS05" = "Session S05",
+      "sessionS06" = "Session S06",
+      "sessionS07" = "Session S07",
+      "sessionS08" = "Session S08",
+      "sessionS09" = "Session S09",
+      "sessionS10" = "Session S10"
+    ),
+    Estimate = sprintf("%.3f", Estimate),
+    SE = sprintf("%.3f", `Std. Error`),
+    z = sprintf("%.3f", `z value`),
+    P = dplyr::case_when(
+      `Pr(>|z|)` < 0.001 ~ "<0.001",
+      TRUE ~ sprintf("%.3f", `Pr(>|z|)`)
+    )
+  )
+
+knitr::kable(
+  table_S4A,
+  caption = paste(
+    "Table S4A. Parameter estimates of the final binomial model used to",
+    "analyse insect mortality. Chasselas, control treatment and session S02",
+    "were used as the reference levels. Estimates are reported on the logit scale."
+  ),
+  align = c("l", "r", "r", "r", "r")
+)
+
+write.csv(
+  table_S4A,
+  "tables/S4A.csv",
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+```
+
+## Table S4B: model-based mortality probabilities by cultivar
+
+Table S4B reports model-based mortality probabilities for each cultivar,
+averaged across treatment and experimental session. Values are presented
+with 95% confidence intervals. Absolute differences are expressed in
+percentage points relative to Merlot. P-values correspond to
+Dunnett-adjusted planned contrasts against Merlot.
+
+```{r}
+#| label: table-s4b
+
+emm_table <- as.data.frame(emm_cultivar) |>
+  dplyr::rename(
+    estimated_probability = prob,
+    lower_CI = asymp.LCL,
+    upper_CI = asymp.UCL
+  ) |>
+  dplyr::mutate(
+    cultivar_name = dplyr::recode(
+      cultivar,
+      "CH" = "Chasselas",
+      "CR" = "Chardonnay",
+      "CS" = "Cabernet Sauvignon",
+      "GM" = "Gamaret",
+      "GY" = "Gamay",
+      "ME" = "Merlot",
+      "PN" = "Pinot Noir"
+    )
+  )
+
+contrast_table <- as.data.frame(
+  summary(
+    contrast_merlot,
+    infer = TRUE
+  )
+) |>
+  dplyr::mutate(
+    cultivar = sub(" / ME", "", contrast),
+    cultivar_name = dplyr::recode(
+      cultivar,
+      "CH" = "Chasselas",
+      "CR" = "Chardonnay",
+      "CS" = "Cabernet Sauvignon",
+      "GM" = "Gamaret",
+      "GY" = "Gamay",
+      "PN" = "Pinot Noir"
+    )
+  ) |>
+  dplyr::select(
+    cultivar_name,
+    p.value
+  )
+
+merlot_probability <- emm_table |>
+  dplyr::filter(cultivar == "ME") |>
+  dplyr::pull(estimated_probability)
+
+table_S4B <- emm_table |>
+  dplyr::left_join(
+    contrast_table,
+    by = "cultivar_name"
+  ) |>
+  dplyr::mutate(
+    Cultivar = factor(
+      cultivar_name,
+      levels = c(
+        "Merlot",
+        "Pinot Noir",
+        "Chasselas",
+        "Gamay",
+        "Gamaret",
+        "Chardonnay",
+        "Cabernet Sauvignon"
+      )
+    ),
+    `Mortality probability (%) (95% CI)` = sprintf(
+      "%.1f (%.1f-%.1f)",
+      100 * estimated_probability,
+      100 * lower_CI,
+      100 * upper_CI
+    ),
+    `Delta probability vs Merlot (percentage points)` =
+      dplyr::case_when(
+        cultivar == "ME" ~ "-",
+        TRUE ~ sprintf(
+          "%.1f",
+          100 * (estimated_probability - merlot_probability)
+        )
+      ),
+    `Dunnett-adjusted p-value vs Merlot` =
+      dplyr::case_when(
+        cultivar == "ME" ~ "-",
+        p.value < 0.001 ~ "<0.001",
+        TRUE ~ sprintf("%.3f", p.value)
+      )
+  ) |>
+  dplyr::arrange(Cultivar) |>
+  dplyr::select(
+    Cultivar,
+    `Mortality probability (%) (95% CI)`,
+    `Delta probability vs Merlot (percentage points)`,
+    `Dunnett-adjusted p-value vs Merlot`
+  )
+
+knitr::kable(
+  table_S4B,
+  caption = paste(
+    "Table S4B. Model-based mortality probabilities (%) of insects for each",
+    "cultivar averaged across treatment and experimental session. Values are",
+    " presented with 95% confidence intervals (CI). Absolute differences",
+    "(Delta P) are expressed in percentage points relative to the reference",
+    "cultivar Merlot. P-values correspond to Dunnett-adjusted planned contrasts versus Merlot."
+  ),
+  align = c("l", "c", "r", "r")
+)
+
+write.csv(
+  table_S4B,
+  "tables/S4B.csv",
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+```
+
