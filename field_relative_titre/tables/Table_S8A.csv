@@ -1,0 +1,4 @@
+Term,Estimate,SE,z,P value
+Intercept (Merlot),0.015,0.178,0.083,0.934
+Chasselas,1.667,0.267,6.240,<0.001
+Pinot Noir,2.806,0.242,11.617,<0.001
