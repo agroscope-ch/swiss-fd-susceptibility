@@ -1,0 +1,784 @@
+---
+title: "Relative FD phytoplasma titre in field samples"
+author: "Jasmine Cadena"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: source
+---
+
+# Analysis overview
+
+This analysis examines relative Flavescence dorée phytoplasma (FDp) titre in field samples of Merlot, Chasselas and Pinot Noir. Relative titre is expressed as ΔΔCt-derived fold change, with Merlot as the reference cultivar.
+
+# Software and packages
+
+```{r}
+#| label: setup
+
+library(dplyr)
+library(ggplot2)
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(multcomp)
+library(multcompView)
+library(knitr)
+
+dir.create("figures", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+```
+
+# Data import and preparation
+
+## Data import
+
+The dataset contains the cultivar and the ΔΔCt-derived fold change for each field sample.
+
+```{r}
+#| label: data-import
+
+field_titre <- read.csv2(
+  "https://zenodo.org/records/21885421/files/field_titre.csv?download=1",
+  dec = ".",
+  stringsAsFactors = FALSE
+)
+
+str(field_titre)
+```
+
+## Data preparation
+
+The dataset is imported and cultivar is encoded as a factor before fitting the candidate models.
+
+```{r}
+#| label: data-preparation
+
+analysis_data <- field_titre |>
+  mutate(
+    cultivar = factor(
+      cultivar,
+      levels = c(
+        "Merlot",
+        "Chasselas",
+        "Pinot Noir"
+      )
+    )
+  )
+
+summary(analysis_data$fold_change)
+table(analysis_data$cultivar)
+```
+
+# Descriptive statistics
+
+Descriptive statistics summarise the observed fold-change distribution for each cultivar.
+
+```{r}
+#| label: descriptive-statistics
+
+observed_summary <- analysis_data |>
+  group_by(cultivar) |>
+  summarise(
+    n = n(),
+    mean = mean(fold_change),
+    median = median(fold_change),
+    sd = sd(fold_change),
+    minimum = min(fold_change),
+    maximum = max(fold_change),
+    .groups = "drop"
+  )
+
+kable(
+  observed_summary,
+  digits = 2
+)
+```
+
+# Family selection
+
+Fold-change values are positive and right-skewed. Gaussian models on the original and logarithmic scales and a Gamma model with a log link are therefore compared. All three models contain cultivar as the explanatory variable.
+
+## Gaussian model on the original scale
+
+```{r}
+#| label: gaussian-model
+
+model_gaussian <- glmmTMB(
+  fold_change ~ cultivar,
+  family = gaussian(link = "identity"),
+  data = analysis_data
+)
+
+summary(model_gaussian)
+```
+
+```{r}
+#| label: gaussian-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the Gaussian model fitted on the original response scale."
+
+set.seed(1234)
+
+simulation_gaussian <- simulateResiduals(
+  fittedModel = model_gaussian,
+  n = 1000
+)
+
+plot(simulation_gaussian)
+
+gaussian_uniformity <- testUniformity(simulation_gaussian)
+gaussian_dispersion <- testDispersion(simulation_gaussian)
+gaussian_outliers <- testOutliers(simulation_gaussian)
+
+gaussian_uniformity
+gaussian_dispersion
+gaussian_outliers
+
+plotResiduals(
+  simulation_gaussian,
+  form = analysis_data$cultivar
+)
+```
+
+## Log-Gaussian model
+
+```{r}
+#| label: log-gaussian-model
+
+model_log_gaussian <- glmmTMB(
+  log(fold_change) ~ cultivar,
+  family = gaussian(link = "identity"),
+  data = analysis_data
+)
+
+summary(model_log_gaussian)
+```
+
+```{r}
+#| label: log-gaussian-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the Gaussian model fitted on log-transformed fold-change values."
+
+set.seed(1234)
+
+simulation_log_gaussian <- simulateResiduals(
+  fittedModel = model_log_gaussian,
+  n = 1000
+)
+
+plot(simulation_log_gaussian)
+
+log_gaussian_uniformity <- testUniformity(simulation_log_gaussian)
+log_gaussian_dispersion <- testDispersion(simulation_log_gaussian)
+log_gaussian_outliers <- testOutliers(simulation_log_gaussian)
+
+log_gaussian_uniformity
+log_gaussian_dispersion
+log_gaussian_outliers
+
+plotResiduals(
+  simulation_log_gaussian,
+  form = analysis_data$cultivar
+)
+```
+
+## Gamma model with a log link
+
+```{r}
+#| label: gamma-model
+
+model_gamma <- glmmTMB(
+  fold_change ~ cultivar,
+  family = Gamma(link = "log"),
+  data = analysis_data
+)
+
+summary(model_gamma)
+```
+
+```{r}
+#| label: gamma-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the Gamma model with a log link."
+
+set.seed(1234)
+
+simulation_gamma <- simulateResiduals(
+  fittedModel = model_gamma,
+  n = 1000
+)
+
+plot(simulation_gamma)
+
+gamma_uniformity <- testUniformity(simulation_gamma)
+gamma_dispersion <- testDispersion(simulation_gamma)
+gamma_outliers <- testOutliers(simulation_gamma)
+
+gamma_uniformity
+gamma_dispersion
+gamma_outliers
+
+plotResiduals(
+  simulation_gamma,
+  form = analysis_data$cultivar
+)
+```
+
+The log-Gaussian model is fitted to a transformed response, whereas the Gaussian and Gamma models are fitted directly to fold change. The Jacobian correction places the log-Gaussian AIC on the original response scale before the models are compared.
+
+```{r}
+#| label: family-comparison
+
+AIC_gaussian <- AIC(model_gaussian)
+
+AIC_log_gaussian_corrected <-
+  AIC(model_log_gaussian) +
+  2 * sum(log(analysis_data$fold_change))
+
+AIC_gamma <- AIC(model_gamma)
+
+family_comparison <- data.frame(
+  distribution = c(
+    "Gaussian",
+    "Log-Gaussian",
+    "Gamma with log link"
+  ),
+  AIC = c(
+    AIC_gaussian,
+    AIC_log_gaussian_corrected,
+    AIC_gamma
+  ),
+  uniformity_p = c(
+    gaussian_uniformity$p.value,
+    log_gaussian_uniformity$p.value,
+    gamma_uniformity$p.value
+  ),
+  dispersion_p = c(
+    gaussian_dispersion$p.value,
+    log_gaussian_dispersion$p.value,
+    gamma_dispersion$p.value
+  ),
+  outliers_p = c(
+    gaussian_outliers$p.value,
+    log_gaussian_outliers$p.value,
+    gamma_outliers$p.value
+  )
+) |>
+  arrange(AIC) |>
+  mutate(
+    delta_AIC = AIC - min(AIC)
+  )
+
+kable(
+  family_comparison,
+  digits = 3
+)
+```
+
+The log-Gaussian model is retained because it provides the lowest AIC and satisfactory residual diagnostics. Although the DHARMa outlier test is significant (P = 0.049), only two observations are identified as potential outliers and are retained because they correspond to valid observations.
+
+# Model structure and term selection
+
+The final model includes cultivar as the explanatory variable in a Gaussian model fitted to log-transformed fold-change values.
+
+# Final model
+
+```{r}
+#| label: final-model
+
+final_model <- model_log_gaussian
+
+summary(final_model)
+```
+
+# Final-model diagnostics
+
+The log-Gaussian diagnostics presented in the family-selection section assess residual uniformity, dispersion and outliers for the retained model.
+
+# Statistical inference
+
+The overall cultivar effect is evaluated by likelihood-ratio comparison with a log-Gaussian model containing no cultivar term.
+
+```{r}
+#| label: cultivar-likelihood-ratio-test
+
+null_model <- glmmTMB(
+  log(fold_change) ~ 1,
+  family = gaussian(link = "identity"),
+  data = analysis_data
+)
+
+cultivar_lrt <- anova(
+  null_model,
+  final_model,
+  test = "Chisq"
+)
+
+cultivar_lrt
+```
+
+# Estimated marginal means and contrasts
+
+Estimated marginal means are calculated for each cultivar and back-transformed to the fold-change scale.
+
+```{r}
+#| label: estimated-marginal-means
+
+cultivar_emmeans <- emmeans(
+  final_model,
+  ~ cultivar
+)
+
+cultivar_emmeans_response <- summary(
+  cultivar_emmeans,
+  type = "response",
+  infer = c(TRUE, TRUE)
+) |>
+  as.data.frame()
+
+cultivar_emmeans_response
+```
+
+Pairwise cultivar comparisons use Tukey adjustment for the three-cultivar family of contrasts.
+
+```{r}
+#| label: tukey-contrasts
+
+cultivar_contrasts <- contrast(
+  cultivar_emmeans,
+  method = "pairwise",
+  adjust = "tukey"
+)
+
+cultivar_contrasts_response <- summary(
+  cultivar_contrasts,
+  type = "response",
+  infer = c(TRUE, TRUE)
+)
+
+cultivar_contrasts_response
+```
+
+Compact-letter groups summarise the Tukey-adjusted comparisons. Cultivars sharing a letter are not significantly different at α = 0.05.
+
+```{r}
+#| label: compact-letter-display
+
+cultivar_groups <- cld(
+  cultivar_emmeans,
+  adjust = "tukey",
+  Letters = letters,
+  type = "response"
+) |>
+  as.data.frame() |>
+  mutate(
+    .group = trimws(.group)
+  )
+
+cultivar_groups
+```
+
+# Figures
+
+The figure uses the back-transformed estimated marginal means, 95% confidence intervals, Tukey groups and observed sample sizes.
+
+```{r}
+#| label: figure-preparation
+
+figure_data <- cultivar_emmeans_response |>
+  dplyr::select(
+    cultivar,
+    response,
+    lower.CL,
+    upper.CL
+  ) |>
+  left_join(
+    cultivar_groups |>
+      dplyr::select(
+        cultivar,
+        .group
+      ),
+    by = "cultivar"
+  ) |>
+  transmute(
+    cultivar,
+    estimate = response,
+    lower = lower.CL,
+    upper = upper.CL,
+    letters = .group
+  ) |>
+  left_join(
+    observed_summary |>
+      dplyr::select(
+        cultivar,
+        n
+      ),
+    by = "cultivar"
+  ) |>
+  mutate(
+    cultivar = factor(
+      cultivar,
+      levels = c(
+        "Merlot",
+        "Chasselas",
+        "Pinot Noir"
+      )
+    ),
+    n_label = paste0(
+      "n = ",
+      n
+    ),
+    letter_y = upper * 1.20,
+    n_y = 0.40
+  )
+
+figure_data
+```
+
+```{r}
+#| label: figure-10
+#| fig-cap: "Figure 10 Model-estimated FDp titre expressed as fold change relative to Merlot in field samples of Chasselas and Pinot Noir. Points represent estimated marginal means obtained from a Gaussian model fitted on log-transformed data, and error bars indicate 95% confidence intervals. Fold changes were calculated using the ΔΔCt method, with Merlot used as the reference cultivar. Different letters indicate significant differences among cultivars based on Tukey-adjusted pairwise comparisons (α = 0.05)."
+#| fig-width: 7.01
+#| fig-height: 4.33
+
+cultivar_colours <- c(
+  "Merlot" = "#B0C4DE",
+  "Chasselas" = "#E4D00A",
+  "Pinot Noir" = "#DF8ADB"
+)
+
+cultivar_labels <- c(
+  "Merlot" = "Merlot",
+  "Chasselas" = "Chasselas",
+  "Pinot Noir" = "Pinot Noir"
+)
+
+figure_10 <- ggplot(
+  figure_data,
+  aes(
+    x = cultivar,
+    y = estimate,
+    colour = cultivar
+  )
+) +
+  geom_errorbar(
+    aes(
+      ymin = lower,
+      ymax = upper
+    ),
+    width = 0.08,
+    linewidth = 0.6
+  ) +
+  geom_point(
+    size = 3.4
+  ) +
+  geom_text(
+    aes(
+      y = letter_y,
+      label = letters
+    ),
+    colour = "black",
+    size = 4.2,
+    fontface = "plain"
+  ) +
+  geom_text(
+    aes(
+      y = n_y,
+      label = n_label
+    ),
+    colour = "black",
+    size = 3.2,
+    fontface = "plain",
+    vjust = 0
+  ) +
+  scale_colour_manual(
+    values = cultivar_colours,
+    guide = "none"
+  ) +
+  scale_x_discrete(
+    labels = cultivar_labels
+  ) +
+  scale_y_log10(
+    limits = c(
+      0.35,
+      max(figure_data$letter_y) * 1.15
+    ),
+    breaks = c(
+      0.5,
+      1,
+      2,
+      5,
+      10,
+      20,
+      50
+    ),
+    labels = c(
+      "0.5",
+      "1",
+      "2",
+      "5",
+      "10",
+      "20",
+      "50"
+    ),
+    expand = expansion(
+      mult = c(
+        0,
+        0.02
+      )
+    )
+  ) +
+  labs(
+    x = "Cultivar",
+    y = "Estimated relative FD phytoplasma titre"
+  ) +
+  theme_minimal(
+    base_size = 10,
+    base_family = "Arial"
+  ) +
+  theme(
+    axis.title.x = element_text(
+      size = 11,
+      colour = "black",
+      margin = margin(
+        t = 10
+      )
+    ),
+    axis.title.y = element_text(
+      size = 11,
+      colour = "black",
+      margin = margin(
+        r = 10
+      )
+    ),
+    axis.text.x = element_text(
+      size = 9,
+      colour = "black",
+      angle = 45,
+      hjust = 1,
+      vjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 9,
+      colour = "black"
+    ),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(
+      colour = "grey88",
+      linewidth = 0.4
+    ),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_blank(),
+    panel.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.margin = margin(
+      10,
+      12,
+      12,
+      12
+    )
+  )
+
+figure_10
+```
+
+```{r}
+#| label: figure-export
+
+figure_file <- "figures/Figure_10.tiff"
+
+# The figure is exported with the same dimensions and graphical settings used in the original analysis.
+ggsave(
+  filename = figure_file,
+  plot = figure_10,
+  device = "tiff",
+  width = 178,
+  height = 110,
+  units = "mm",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+
+cat(
+  "TIFF successfully created at:\n",
+  normalizePath(
+    figure_file,
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
+# Exported tables
+
+**Table Supplementary 9. Model-based relative FD phytoplasma titre in field samples of Merlot, Chasselas and Pinot Noir. Relative FD phytoplasma titre is expressed as fold change relative to Merlot using the ΔΔCt method.**
+
+## Table S8A
+
+Table S8A reports the parameter estimates of the final log-Gaussian model. Merlot is the reference cultivar. Estimates are reported on the log-transformed response scale.
+
+```{r}
+#| label: table-S8A
+
+coefficient_matrix <- summary(
+  final_model
+)$coefficients$cond
+
+parameter_labels <- c(
+  "(Intercept)" = "Intercept (Merlot)",
+  "cultivarChasselas" = "Chasselas",
+  "cultivarPinot Noir" = "Pinot Noir"
+)
+
+table_S8A <- data.frame(
+  Term = unname(
+    parameter_labels[
+      rownames(coefficient_matrix)
+    ]
+  ),
+  Estimate = sprintf(
+    "%.3f",
+    coefficient_matrix[, "Estimate"]
+  ),
+  SE = sprintf(
+    "%.3f",
+    coefficient_matrix[, "Std. Error"]
+  ),
+  z = sprintf(
+    "%.3f",
+    coefficient_matrix[, "z value"]
+  ),
+  `P value` = ifelse(
+    coefficient_matrix[, "Pr(>|z|)"] < 0.001,
+    "<0.001",
+    sprintf(
+      "%.3f",
+      coefficient_matrix[, "Pr(>|z|)"]
+    )
+  ),
+  check.names = FALSE,
+  row.names = NULL
+)
+
+kable(
+  table_S8A,
+  align = c("l", "r", "r", "r", "r"),
+  caption = paste(
+    "Table S8A. Parameter estimates of the final log-Gaussian",
+    "model. Merlot is the reference cultivar. Estimates are",
+    "reported on the log-transformed response scale."
+  )
+)
+```
+
+```{r}
+#| label: table-S8A-export
+
+csv_file_S8A <- "tables/Table_S8A.csv"
+
+write.csv(
+  table_S8A,
+  csv_file_S8A,
+  row.names = FALSE,
+  fileEncoding = "UTF-8",
+  quote = FALSE
+)
+
+cat(
+  "CSV successfully created at:\n",
+  normalizePath(
+    csv_file_S8A,
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
+## Table S8B
+
+Table S8B reports estimated marginal means back-transformed to the response scale and expressed as ΔΔCt-derived fold change relative to Merlot with 95% confidence intervals. Different letters indicate significant differences among cultivars based on Tukey-adjusted pairwise comparisons.
+
+```{r}
+#| label: table-S8B
+
+table_S8B <- cultivar_emmeans_response |>
+  dplyr::select(
+    cultivar,
+    response,
+    lower.CL,
+    upper.CL
+  ) |>
+  left_join(
+    cultivar_groups |>
+      dplyr::select(
+        cultivar,
+        .group
+      ),
+    by = "cultivar"
+  ) |>
+  transmute(
+    Cultivar = case_when(
+      cultivar == "Merlot" ~ "Merlot (reference)",
+      TRUE ~ as.character(cultivar)
+    ),
+    `Estimated fold change (95% CI)` = sprintf(
+      "%.2f (%.2f-%.2f)",
+      response,
+      lower.CL,
+      upper.CL
+    ),
+    `Statistical group` = .group
+  )
+
+kable(
+  table_S8B,
+  align = c("l", "c", "c"),
+  caption = paste(
+    "Table S8B. Estimated marginal means back-transformed to the",
+    "response scale and expressed as ΔΔCt-derived fold change",
+    "relative to Merlot with 95% confidence intervals (95% CI).",
+    "Different letters indicate significant differences among",
+    "cultivars based on Tukey-adjusted pairwise comparisons."
+  )
+)
+```
+
+```{r}
+#| label: table-S8B-export
+
+csv_file_S8B <- "tables/Table_S8B.csv"
+
+write.csv(
+  table_S8B,
+  csv_file_S8B,
+  row.names = FALSE,
+  fileEncoding = "UTF-8",
+  quote = FALSE
+)
+
+cat(
+  "CSV successfully created at:\n",
+  normalizePath(
+    csv_file_S8B,
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
