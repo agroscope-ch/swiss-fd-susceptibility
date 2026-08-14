@@ -1,0 +1,743 @@
+---
+title: "Relative FD phytoplasma titre in inoculated plants"
+author: "Jasmine Cadena"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: source
+---
+
+# Analysis overview
+
+This document reproduces the laboratory analysis of relative flavescence dorée phytoplasma titre in infected grapevines following controlled insect-mediated inoculation.
+
+# Software and packages
+
+```{r}
+#| label: setup
+
+if (getRversion() < "4.5.2") {
+  warning(
+    "This analysis was developed using R 4.5.2. Results should be checked when using an older R version."
+  )
+}
+
+required_packages <- c(
+  "glmmTMB",
+  "DHARMa",
+  "emmeans",
+  "dplyr",
+  "ggplot2",
+  "knitr",
+  "lmtest"
+)
+
+missing_packages <- required_packages[
+  !vapply(
+    required_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    paste0(
+      "The following R packages are required but not installed: ",
+      paste(missing_packages, collapse = ", "),
+      ". Install them with install.packages() before rendering this document."
+    )
+  )
+}
+
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(lmtest)
+
+dir.create("figures", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+```
+
+# Data import and preparation
+
+## Data import
+Only infected plants are included in the dataset because relative phytoplasma titre was quantified only when the phytoplasma was detected.
+
+```{r}
+#| label: data-import
+
+relative_titre <- read.csv(
+  "https://zenodo.org/records/21885421/files/lab_rel_titre.csv?download=1.csv",
+  sep = ";",
+  dec = ".",
+  stringsAsFactors = FALSE
+)
+
+str(relative_titre)
+```
+
+## Data preparation
+
+The response variable is a strictly positive ΔΔCt-derived fold change. Merlot is set as the reference cultivar to reproduce the parameterisation reported in the manuscript.
+
+```{r}
+#| label: data-preparation
+
+analysis_data <- relative_titre |>
+  mutate(
+    cultivar = factor(
+      cultivar,
+      levels = c("ME", "CH", "CR", "CS", "GM", "GY", "PN")
+    )
+  )
+
+str(analysis_data)
+```
+
+# Descriptive statistics
+
+```{r}
+#| label: descriptive-statistics
+
+sample_sizes <- analysis_data |>
+  count(cultivar, name = "n")
+
+descriptive_statistics <- analysis_data |>
+  group_by(cultivar) |>
+  summarise(
+    n = n(),
+    mean_fold_change = mean(fold_change),
+    median_fold_change = median(fold_change),
+    standard_deviation = sd(fold_change),
+    minimum = min(fold_change),
+    maximum = max(fold_change),
+    mean_infected_insects = mean(infected_insects),
+    .groups = "drop"
+  )
+
+kable(descriptive_statistics, digits = 3)
+```
+
+# Family selection
+
+Relative titre is continuous, strictly positive and strongly right-skewed on its original scale. Gaussian models fitted to the original and log-transformed response scales and a Gamma model with a log link are therefore evaluated using the same cultivar structure and exposure offset.
+
+```{r}
+#| label: family-models
+
+model_gaussian <- glmmTMB(
+  fold_change ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = gaussian(link = "identity")
+)
+
+model_log_gaussian <- glmmTMB(
+  log(fold_change) ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = gaussian(link = "identity")
+)
+
+model_gamma <- glmmTMB(
+  fold_change ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = Gamma(link = "log")
+)
+```
+
+The log-Gaussian model is fitted to a transformed response. Its AIC is corrected using the Jacobian of the logarithmic transformation before comparison with models fitted directly to `fold_change`.
+
+```{r}
+#| label: family-comparison
+
+family_comparison <- data.frame(
+  family = c(
+    "Gaussian",
+    "Log-Gaussian",
+    "Gamma with log link"
+  ),
+  AIC = c(
+    AIC(model_gaussian),
+    AIC(model_log_gaussian) +
+      2 * sum(log(analysis_data$fold_change)),
+    AIC(model_gamma)
+  )
+) |>
+  arrange(AIC) |>
+  mutate(
+    delta_AIC = AIC - min(AIC)
+  )
+
+kable(family_comparison, digits = 2)
+```
+
+## Residual diagnostics for the Gaussian model
+
+```{r}
+#| label: diagnostics-gaussian
+#| fig-cap: "DHARMa residual diagnostics for the Gaussian model fitted to relative titre on the original scale."
+
+set.seed(123)
+sim_gaussian <- simulateResiduals(model_gaussian, n = 1000)
+plot(sim_gaussian)
+testUniformity(sim_gaussian)
+testDispersion(sim_gaussian)
+testOutliers(sim_gaussian)
+```
+
+## Residual diagnostics for the log-Gaussian model
+
+```{r}
+#| label: diagnostics-log-gaussian
+#| fig-cap: "DHARMa residual diagnostics for the Gaussian model fitted to log-transformed relative titre."
+
+set.seed(123)
+sim_log_gaussian <- simulateResiduals(model_log_gaussian, n = 1000)
+plot(sim_log_gaussian)
+testUniformity(sim_log_gaussian)
+testDispersion(sim_log_gaussian)
+testOutliers(sim_log_gaussian)
+```
+
+## Residual diagnostics for the Gamma model
+
+```{r}
+#| label: diagnostics-gamma
+#| fig-cap: "DHARMa residual diagnostics for the Gamma model with a log link."
+
+set.seed(123)
+sim_gamma <- simulateResiduals(model_gamma, n = 1000)
+plot(sim_gamma)
+testUniformity(sim_gamma)
+testDispersion(sim_gamma)
+testOutliers(sim_gamma)
+```
+
+The log-Gaussian model is retained because it provides the best fit according to the corrected AIC and its residual diagnostics are compatible with the model assumptions.
+
+# Model structure and term selection
+
+## Exposure term: offset versus freely estimated slope
+The offset formulation fixes the coefficient of log(infected_insects) to one by definition. This assumption is first evaluated by testing whether the relationship between exposure and relative phytoplasma titre differs among cultivars. A common freely estimated slope is then compared with the offset formulation.
+
+## Cultivar-by-exposure interaction
+
+The interaction model allows the relationship between `log(infected_insects)` and log-transformed relative titre to differ among cultivars. It is compared with an additive model containing one common exposure slope.
+
+```{r}
+#| label: exposure-interaction
+
+model_free_slope <- glmmTMB(
+  log(fold_change) ~ cultivar + log(infected_insects),
+  data = analysis_data,
+  family = gaussian(link = "identity")
+)
+
+model_exposure_interaction <- glmmTMB(
+  log(fold_change) ~ cultivar * log(infected_insects),
+  data = analysis_data,
+  family = gaussian(link = "identity")
+)
+
+AIC(
+  model_free_slope,
+  model_exposure_interaction
+)
+
+interaction_lrt <- lrtest(
+  model_free_slope,
+  model_exposure_interaction
+)
+
+interaction_lrt
+```
+
+There is no evidence that the exposure slope differs among cultivars. The interaction is therefore not retained, and the common-slope formulation is used to evaluate the offset assumption.
+
+## Offset versus freely estimated exposure slope
+
+The offset model fixes the coefficient of `log(infected_insects)` to one. The freely estimated model tests whether relaxing this proportional relationship improves model fit.
+
+```{r}
+#| label: offset-comparison
+
+model_offset <- model_log_gaussian
+
+AIC(
+  model_offset,
+  model_free_slope
+)
+
+offset_lrt <- lrtest(
+  model_offset,
+  model_free_slope
+)
+
+offset_lrt
+```
+
+
+Estimating the exposure coefficient freely did not improve model fit. The more parsimonious offset formulation was therefore retained.
+
+# Final model
+
+The final model uses a Gaussian distribution for log-transformed relative titre, includes cultivar as a fixed effect and includes `log(infected_insects)` as an offset. Merlot is the reference cultivar.
+
+```{r}
+#| label: final-model
+
+model_final <- glmmTMB(
+  log(fold_change) ~ cultivar + offset(log(infected_insects)),
+  data = analysis_data,
+  family = gaussian(link = "identity")
+)
+
+summary(model_final)
+```
+
+# Final-model diagnostics
+
+```{r}
+#| label: final-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the final log-Gaussian model."
+
+set.seed(123)
+sim_final <- simulateResiduals(model_final, n = 1000)
+plot(sim_final)
+testUniformity(sim_final)
+testDispersion(sim_final)
+testOutliers(sim_final)
+```
+
+```{r}
+#| label: residuals-by-cultivar
+#| fig-cap: "Scaled residuals according to grapevine cultivar."
+
+plotResiduals(
+  sim_final,
+  form = analysis_data$cultivar
+)
+```
+
+```{r}
+#| label: residuals-by-exposure
+#| fig-cap: "Scaled residuals according to the number of infected insects recovered per plant."
+
+plotResiduals(
+  sim_final,
+  form = analysis_data$infected_insects
+)
+```
+
+# Statistical inference
+
+Inference is performed after the final response distribution and exposure structure have been selected and the final-model diagnostics have been examined.
+
+## Global likelihood-ratio test for cultivar
+
+The global cultivar effect is evaluated by comparing the final model with a nested model lacking the cultivar term while retaining the same offset.
+
+```{r}
+#| label: cultivar-lrt
+
+model_without_cultivar <- glmmTMB(
+  log(fold_change) ~ offset(log(infected_insects)),
+  data = analysis_data,
+  family = gaussian(link = "identity")
+)
+
+cultivar_lrt <- lrtest(
+  model_without_cultivar,
+  model_final
+)
+
+cultivar_lrt
+```
+
+# Estimated marginal means and contrasts
+
+## Estimated relative titre
+
+Cultivar-specific relative titres are estimated at a standardised exposure of four infected insects per plant. Estimates are back-transformed to the original fold-change scale.
+
+```{r}
+#| label: estimated-relative-titre
+
+estimated_titre <- emmeans(
+  model_final,
+  ~ cultivar,
+  at = list(infected_insects = 4)
+)
+
+estimated_titre_response <- summary(
+  estimated_titre,
+  type = "response",
+  infer = c(TRUE, TRUE)
+)
+
+estimated_titre_response
+```
+
+## Dunnett-adjusted comparisons against Merlot
+
+The comparisons against Merlot are adjusted using Dunnett's method. They are used only to determine whether each cultivar differs from the reference cultivar and do not represent all pairwise cultivar comparisons.
+
+```{r}
+#| label: merlot-contrasts
+
+contrasts_merlot <- contrast(
+  estimated_titre,
+  method = "trt.vs.ctrl",
+  ref = 1,
+  adjust = "dunnett"
+)
+
+contrasts_merlot_response <- summary(
+  contrasts_merlot,
+  type = "response",
+  infer = c(TRUE, TRUE)
+)
+
+contrasts_merlot_response
+```
+
+## Planned contrast between Pinot Noir and Chasselas
+
+The planned Pinot Noir versus Chasselas contrast is evaluated without multiplicity adjustment because it addresses a specific comparison defined independently of the complete set of cultivar contrasts.
+
+```{r}
+#| label: pn-ch-contrast
+
+pn_ch_contrast <- contrast(
+  estimated_titre,
+  method = list(
+    "Pinot Noir / Chasselas" = c(
+      0,
+      -1,
+      0,
+      0,
+      0,
+      0,
+      1
+    )
+  ),
+  adjust = "none"
+)
+
+pn_ch_contrast_response <- summary(
+  pn_ch_contrast,
+  type = "response",
+  infer = c(TRUE, TRUE)
+)
+
+pn_ch_contrast_response
+```
+
+# Figures
+
+Letters summarise only the Dunnett-adjusted comparisons against Merlot. A cultivar receives the same letter as Merlot when it does not differ significantly from Merlot. These letters are not a complete compact-letter display of all pairwise cultivar comparisons.
+
+```{r}
+#| label: relative-titre-figure
+#| fig-cap: "Estimated relative FDp titre in infected grapevines by cultivar following exposure to four infected insects per plant. Points represent estimated relative titres (± 95% confidence intervals). Estimates are expressed as ΔΔCt-derived fold changes relative to the reference cultivar Merlot. Letters indicate significant differences from Merlot based on targeted Dunnett-adjusted contrasts (α = 0.05). Numbers indicate the number of infected grapevines analysed per cultivar."
+#| fig-width: 7.01
+#| fig-height: 4.33
+
+cultivar_names <- c(
+  "ME" = "Merlot",
+  "PN" = "Pinot Noir",
+  "CH" = "Chasselas",
+  "GY" = "Gamay",
+  "GM" = "Gamaret",
+  "CR" = "Chardonnay",
+  "CS" = "Cabernet Sauvignon"
+)
+
+cultivar_colours <- c(
+  "Merlot" = "#B0C4DE",
+  "Pinot Noir" = "#DF8ADB",
+  "Chasselas" = "#E4D00A",
+  "Gamay" = "#F8766D",
+  "Gamaret" = "#5B9BD5",
+  "Chardonnay" = "#A6D854",
+  "Cabernet Sauvignon" = "#F4A32C"
+)
+
+merlot_p_values <- as.data.frame(
+  summary(contrasts_merlot)
+) |>
+  transmute(
+    cultivar = gsub(
+      " / ME| - ME",
+      "",
+      contrast
+    ),
+    dunnett_p_value = p.value
+  )
+
+figure_data <- as.data.frame(
+  estimated_titre_response
+) |>
+  mutate(
+    cultivar = as.character(cultivar)
+  ) |>
+  left_join(
+    merlot_p_values,
+    by = "cultivar"
+  ) |>
+  left_join(
+    sample_sizes |>
+      mutate(cultivar = as.character(cultivar)),
+    by = "cultivar"
+  ) |>
+  mutate(
+    comparison_group = case_when(
+      cultivar == "ME" ~ "a",
+      !is.na(dunnett_p_value) & dunnett_p_value < 0.05 ~ "b",
+      TRUE ~ "a"
+    ),
+    cultivar_name = recode(
+      cultivar,
+      !!!cultivar_names
+    ),
+    cultivar_name = factor(
+      cultivar_name,
+      levels = c(
+        "Merlot",
+        "Pinot Noir",
+        "Chasselas",
+        "Gamay",
+        "Gamaret",
+        "Chardonnay",
+        "Cabernet Sauvignon"
+      )
+    ),
+    letter_y = upper.CL * 1.30,
+    sample_y = 0.055,
+    sample_label = paste0("n = ", n)
+  )
+
+relative_titre_figure <- ggplot(
+  figure_data,
+  aes(
+    x = cultivar_name,
+    y = response,
+    colour = cultivar_name
+  )
+) +
+  geom_errorbar(
+    aes(
+      ymin = lower.CL,
+      ymax = upper.CL
+    ),
+    width = 0.08,
+    linewidth = 0.6
+  ) +
+  geom_point(size = 3.4) +
+  geom_text(
+    aes(
+      y = letter_y,
+      label = comparison_group
+    ),
+    colour = "black",
+    size = 4
+  ) +
+  geom_text(
+    aes(
+      y = sample_y,
+      label = sample_label
+    ),
+    colour = "black",
+    size = 3
+  ) +
+  scale_colour_manual(
+    values = cultivar_colours,
+    guide = "none"
+  ) +
+  scale_y_log10(
+    limits = c(0.04, 50),
+    breaks = c(0.1, 1, 10),
+    labels = c("0.1", "1.0", "10.0")
+  ) +
+  labs(
+    x = "Cultivar",
+    y = "Estimated relative FD phytoplasma titre"
+  ) +
+  theme_minimal(
+    base_size = 10,
+    base_family = "Arial"
+  ) +
+  theme(
+    axis.title.x = element_text(
+      size = 11,
+      colour = "black",
+      margin = margin(t = 10)
+    ),
+    axis.title.y = element_text(
+      size = 11,
+      colour = "black",
+      margin = margin(r = 10)
+    ),
+    axis.text.x = element_text(
+      size = 9,
+      colour = "black",
+      angle = 45,
+      hjust = 1,
+      vjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 9,
+      colour = "black"
+    ),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(
+      colour = "grey88",
+      linewidth = 0.4
+    ),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_blank(),
+    panel.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.margin = margin(10, 12, 12, 12)
+  )
+
+relative_titre_figure
+
+ggsave(
+  filename = "figures/Figure 3.tiff",
+  plot = relative_titre_figure,
+  width = 178,
+  height = 110,
+  units = "mm",
+  dpi = 600,
+  bg = "white"
+)
+```
+
+# Exported tables
+
+## Table S3A: final-model parameter estimates
+
+The parameter table is reported on the log-transformed response scale. Merlot is the reference cultivar.
+
+```{r}
+#| label: table-S3A
+
+coefficient_table <- as.data.frame(
+  summary(model_final)$coefficients$cond
+) |>
+  mutate(
+    parameter = row.names(
+      summary(model_final)$coefficients$cond
+    ),
+    Parameter = recode(
+      parameter,
+      "(Intercept)" = "Intercept (Merlot)",
+      "cultivarCH" = "Chasselas",
+      "cultivarCR" = "Chardonnay",
+      "cultivarCS" = "Cabernet Sauvignon",
+      "cultivarGM" = "Gamaret",
+      "cultivarGY" = "Gamay",
+      "cultivarPN" = "Pinot Noir"
+    )
+  ) |>
+  transmute(
+    Parameter,
+    Estimate,
+    SE = `Std. Error`,
+    z = `z value`,
+    P = `Pr(>|z|)`
+  )
+
+kable(coefficient_table, digits = 3)
+
+write.csv(
+  coefficient_table,
+  "tables/S3A.csv",
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat(
+  "CSV successfully created at:\n",
+  normalizePath(
+    "tables/S3A.csv",
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
+## Table S3B: estimated relative titre by cultivar
+
+The statistical groups indicate only whether each cultivar differs from Merlot according to the Dunnett-adjusted comparisons.
+
+```{r}
+#| label: table-S3B
+
+relative_titre_table <- figure_data |>
+  mutate(
+    table_order = factor(
+      cultivar,
+      levels = c("ME", "CH", "CR", "CS", "GM", "GY", "PN")
+    )
+  ) |>
+  arrange(table_order) |>
+  mutate(
+    Cultivar = case_when(
+      cultivar == "ME" ~ "Merlot (reference)",
+      TRUE ~ as.character(cultivar_name)
+    ),
+    `Estimated fold change (95% CI)` = sprintf(
+      "%.2f (%.2f-%.2f)",
+      response,
+      lower.CL,
+      upper.CL
+    ),
+    `Statistical group` = comparison_group
+  ) |>
+  dplyr::select(
+    Cultivar,
+    `Estimated fold change (95% CI)`,
+    `Statistical group`
+  )
+
+kable(relative_titre_table)
+
+write.csv(
+  relative_titre_table,
+  "tables/S3B.csv",
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat(
+  "CSV successfully created at:\n",
+  normalizePath(
+    "tables/S3B.csv",
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
