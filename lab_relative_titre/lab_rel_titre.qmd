@@ -630,6 +630,7 @@ ggsave(
   height = 110,
   units = "mm",
   dpi = 600,
+  compression = "lzw",
   bg = "white"
 )
 ```
