@@ -1,0 +1,776 @@
+---
+title: "Micro-scale flavescence dorée incidence at Chasselas-Pinot Noir boundaries"
+author: "Jasmine Cadena"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: source
+---
+
+# Analysis overview
+
+This document reproduces the micro-scale analysis of flavescence dorée incidence in adjacent Chasselas and Pinot Noir vineyards within 65 buffer zones located in Lavaux and Chablais, canton of Vaud.
+
+The response is the number of FD-positive grapevines recorded for each cultivar within each buffer zone. Vineyard surface is included as an exposure offset so that cultivar effects are estimated as FD-positive grapevines per hectare.
+
+# Software and packages
+
+```{r}
+#| label: setup
+
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(multcomp)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+
+dir.create("figures", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+```
+
+# Data import and preparation
+
+## Data import
+
+The dataset contains Chasselas and Pinot Noir vineyard fragments located within the 65 buffer zones.
+
+```{r}
+#| label: data-import
+
+micro <- read.csv2(
+  "https://zenodo.org/records/21885421/files/micro.csv?download=1",
+  dec = ".",
+  stringsAsFactors = FALSE
+)
+
+str(micro)
+```
+
+## Data preparation
+
+Fragments are aggregated by buffer zone and cultivar because the statistical unit is the cultivar-specific area represented within each zone. Chasselas is the reference cultivar.
+
+```{r}
+#| label: data-preparation
+
+analysis_data <- micro |>
+  filter(
+    !is.na(zone),
+    !is.na(cultivar),
+    !is.na(surf_ha),
+    !is.na(fd),
+    surf_ha > 0,
+    cultivar %in% c("Chasselas", "Pinot Noir")
+  ) |>
+  group_by(zone, cultivar) |>
+  summarise(
+    surface_ha = sum(surf_ha),
+    fd_positive = sum(fd),
+    .groups = "drop"
+  ) |>
+  mutate(
+    zone = factor(zone),
+    cultivar = factor(
+      cultivar,
+      levels = c("Chasselas", "Pinot Noir")
+    ),
+    observed_fd_ha = fd_positive / surface_ha
+  )
+
+str(analysis_data)
+```
+
+# Descriptive statistics
+
+Observed FD-positive grapevine density is calculated from the total number of FD-positive grapevines divided by the total vineyard surface represented by each cultivar.
+
+```{r}
+#| label: descriptive-statistics
+
+observed_summary <- analysis_data |>
+  group_by(cultivar) |>
+  summarise(
+    surface_ha = sum(surface_ha),
+    fd_positive = sum(fd_positive),
+    observed_fd_ha = fd_positive / surface_ha,
+    .groups = "drop"
+  )
+
+kable(
+  observed_summary,
+  digits = c(0, 2, 0, 2)
+)
+```
+
+# Family selection
+
+The response variable is a count, and vineyard surface differs among cultivar-specific areas. `log(surface_ha)` is included as an offset with a fixed coefficient of 1 so that cultivar effects are expressed as FD-positive grapevines per hectare. Buffer zone is included as a random intercept to account for the paired structure of observations within each zone.
+
+## Poisson model
+
+A Poisson mixed model is fitted first.
+
+```{r}
+#| label: poisson-model
+
+model_poisson <- glmmTMB(
+  fd_positive ~ cultivar + offset(log(surface_ha)) + (1 | zone),
+  data = analysis_data,
+  family = poisson(link = "log")
+)
+
+summary(model_poisson)
+```
+
+Simulation-based residual diagnostics are used to assess the adequacy of the Poisson distribution.
+
+```{r}
+#| label: poisson-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the Poisson mixed model."
+#| fig-width: 8
+#| fig-height: 8
+
+set.seed(123)
+
+simulation_poisson <- simulateResiduals(
+  fittedModel = model_poisson,
+  n = 1000
+)
+
+plot(simulation_poisson)
+
+testUniformity(simulation_poisson)
+testDispersion(simulation_poisson)
+testZeroInflation(simulation_poisson)
+testOutliers(simulation_poisson)
+```
+
+The Poisson model does not adequately account for the dispersion present in the data. Negative binomial distributions are therefore evaluated.
+
+## Negative binomial models
+
+The NB1 and NB2 parameterisations allow the conditional variance to increase differently with the expected count.
+
+```{r}
+#| label: negative-binomial-models
+
+model_nb1 <- glmmTMB(
+  fd_positive ~ cultivar + offset(log(surface_ha)) + (1 | zone),
+  data = analysis_data,
+  family = nbinom1(link = "log")
+)
+
+model_nb2 <- glmmTMB(
+  fd_positive ~ cultivar + offset(log(surface_ha)) + (1 | zone),
+  data = analysis_data,
+  family = nbinom2(link = "log")
+)
+
+summary(model_nb1)
+summary(model_nb2)
+```
+
+### NB1 diagnostics
+
+```{r}
+#| label: nb1-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the NB1 negative binomial mixed model."
+#| fig-width: 8
+#| fig-height: 8
+
+set.seed(123)
+
+simulation_nb1 <- simulateResiduals(
+  fittedModel = model_nb1,
+  n = 1000
+)
+
+plot(simulation_nb1)
+
+testUniformity(simulation_nb1)
+testDispersion(simulation_nb1)
+testZeroInflation(simulation_nb1)
+testOutliers(simulation_nb1)
+```
+
+### NB2 diagnostics
+
+```{r}
+#| label: nb2-diagnostics
+#| fig-cap: "DHARMa residual diagnostics for the NB2 negative binomial mixed model."
+#| fig-width: 8
+#| fig-height: 8
+
+set.seed(123)
+
+simulation_nb2 <- simulateResiduals(
+  fittedModel = model_nb2,
+  n = 1000
+)
+
+plot(simulation_nb2)
+
+testUniformity(simulation_nb2)
+testDispersion(simulation_nb2)
+testZeroInflation(simulation_nb2)
+testOutliers(simulation_nb2)
+```
+
+The fitted count distributions are compared using Akaike's information criterion. Model adequacy is assessed from the residual diagnostics before the AIC values are interpreted.
+
+```{r}
+#| label: family-comparison
+
+family_comparison <- data.frame(
+  model = c(
+    "Poisson",
+    "Negative binomial NB1",
+    "Negative binomial NB2"
+  ),
+  AIC = c(
+    AIC(model_poisson),
+    AIC(model_nb1),
+    AIC(model_nb2)
+  )
+) |>
+  arrange(AIC) |>
+  mutate(
+    delta_AIC = AIC - min(AIC)
+  )
+
+kable(
+  family_comparison,
+  digits = 2,
+  col.names = c(
+    "Model",
+    "AIC",
+    "Delta AIC"
+  )
+)
+```
+
+The NB2 negative binomial distribution provides an adequate residual fit and the strongest support according to AIC. It is retained for the final analysis.
+
+# Model structure and term selection
+
+The NB2 model is fitted with cultivar as a fixed effect, vineyard surface as an exposure offset and buffer zone as a random intercept. The contribution of the random intercept is evaluated before the final model is defined.
+
+The variance associated with the buffer-zone random intercept is examined.
+
+```{r}
+#| label: random-effect-variance
+
+VarCorr(model_nb2)
+```
+
+The estimated standard deviation of the buffer-zone random intercept is 1.38 on the log link scale, indicating substantial variation in FD-positive grapevine density among buffer zones.
+
+The mixed model is compared with the corresponding NB2 model without a random intercept.
+
+```{r}
+#| label: random-effect-comparison
+
+model_nb2_fixed <- glmmTMB(
+  fd_positive ~ cultivar + offset(log(surface_ha)),
+  data = analysis_data,
+  family = nbinom2(link = "log")
+)
+
+random_effect_comparison <- data.frame(
+  model = c(
+    "NB2 without buffer-zone random intercept",
+    "NB2 with buffer-zone random intercept"
+  ),
+  AIC = c(
+    AIC(model_nb2_fixed),
+    AIC(model_nb2)
+  )
+) |>
+  arrange(AIC) |>
+  mutate(
+    delta_AIC = AIC - min(AIC)
+  )
+
+kable(
+  random_effect_comparison,
+  digits = 2,
+  col.names = c(
+    "Model",
+    "AIC",
+    "Delta AIC"
+  )
+)
+```
+
+The AIC is substantially lower for the NB2 model including a buffer-zone random intercept (ΔAIC = 30.32). Together with the substantial random-intercept variance (SD = 1.38), this supports retaining the buffer-zone random intercept in the final model.
+
+# Final model
+
+```{r}
+#| label: final-model
+
+final_model <- model_nb2
+
+summary(final_model)
+```
+
+# Final-model diagnostics
+
+The NB2 diagnostics presented in the family-selection section assess residual uniformity, dispersion, zero inflation and outliers for the retained model.
+
+
+# Statistical inference
+
+The overall cultivar effect is evaluated by likelihood-ratio comparison with a model containing the same NB2 family, exposure offset and random-intercept structure, but no cultivar term.
+
+```{r}
+#| label: cultivar-likelihood-ratio-test
+
+null_model <- glmmTMB(
+  fd_positive ~ offset(log(surface_ha)) + (1 | zone),
+  data = analysis_data,
+  family = nbinom2(link = "log")
+)
+
+cultivar_lrt <- anova(
+  null_model,
+  final_model,
+  test = "Chisq"
+)
+
+cultivar_lrt
+```
+
+# Estimated marginal means and contrasts
+
+Estimated marginal means are calculated on the response scale with the offset set to zero. They therefore represent the expected number of FD-positive grapevines per hectare.
+
+```{r}
+#| label: estimated-marginal-means
+
+cultivar_emmeans <- emmeans(
+  final_model,
+  ~ cultivar,
+  type = "response",
+  offset = 0
+)
+
+cultivar_emmeans
+```
+
+The pairwise comparison uses Tukey adjustment.
+
+```{r}
+#| label: tukey-contrast
+
+cultivar_contrast <- pairs(
+  cultivar_emmeans,
+  adjust = "tukey"
+)
+
+cultivar_contrast
+```
+
+Compact-letter groups summarise the pairwise comparison for Table S7B.
+
+```{r}
+#| label: compact-letter-display
+
+cultivar_estimates <- as.data.frame(cultivar_emmeans) |>
+  rename(
+    estimated_mean = response,
+    lower_CL = asymp.LCL,
+    upper_CL = asymp.UCL
+  )
+
+cultivar_groups <- as.data.frame(
+  cld(
+    cultivar_emmeans,
+    adjust = "tukey",
+    Letters = letters
+  )
+) |>
+  transmute(
+    cultivar,
+    statistical_group = gsub(" ", "", .group)
+  )
+
+cultivar_groups
+```
+
+# Figures
+
+```{r}
+#| label: figure-preparation
+
+contrast_results <- as.data.frame(cultivar_contrast)
+p_value <- contrast_results$p.value[1]
+
+significance_label <- case_when(
+  p_value < 0.001 ~ "***",
+  p_value < 0.01 ~ "**",
+  p_value < 0.05 ~ "*",
+  TRUE ~ "ns"
+)
+
+figure_data <- cultivar_estimates |>
+  left_join(
+    cultivar_groups,
+    by = "cultivar"
+  ) |>
+  mutate(
+    cultivar = factor(
+      cultivar,
+      levels = c("Chasselas", "Pinot Noir")
+    )
+  )
+
+cultivar_colors <- c(
+  "Chasselas" = "#E4D00A",
+  "Pinot Noir" = "#DF8ADB"
+)
+
+y_max <- max(figure_data$upper_CL, na.rm = TRUE)
+y_bracket <- y_max * 1.08
+y_bracket_bottom <- y_max * 1.03
+y_text <- y_max * 1.14
+y_limit <- y_max * 1.20
+```
+
+```{r}
+#| label: figure-8
+#| fig-cap: "Figure 8 Estimated FD+ plants per hectare for the two main grapevine cultivars included in the micro-scale study (Lavaux, Chablais in canton of Vaud). Points represent model-estimated marginal means and error bars indicate 95% confidence intervals. Asterisks indicate significant differences among cultivars based on Tukey-adjusted pairwise comparisons (α = 0.05)."
+#| fig-width: 3.35
+#| fig-height: 3.74
+
+figure_8 <- ggplot(
+  figure_data,
+  aes(
+    x = cultivar,
+    y = estimated_mean,
+    colour = cultivar
+  )
+) +
+  geom_errorbar(
+    aes(
+      ymin = lower_CL,
+      ymax = upper_CL
+    ),
+    width = 0.08,
+    linewidth = 0.6
+  ) +
+  geom_point(
+    size = 3.4
+  ) +
+  annotate(
+    "segment",
+    x = 1,
+    xend = 2,
+    y = y_bracket,
+    yend = y_bracket,
+    linewidth = 0.6,
+    colour = "black"
+  ) +
+  annotate(
+    "segment",
+    x = 1,
+    xend = 1,
+    y = y_bracket,
+    yend = y_bracket_bottom,
+    linewidth = 0.6,
+    colour = "black"
+  ) +
+  annotate(
+    "segment",
+    x = 2,
+    xend = 2,
+    y = y_bracket,
+    yend = y_bracket_bottom,
+    linewidth = 0.6,
+    colour = "black"
+  ) +
+  annotate(
+    "text",
+    x = 1.5,
+    y = y_text,
+    label = significance_label,
+    colour = "black",
+    size = 3.8,
+    fontface = "plain"
+  ) +
+  scale_colour_manual(
+    values = cultivar_colors,
+    guide = "none"
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0))
+  ) +
+  coord_cartesian(
+    ylim = c(0, y_limit),
+    clip = "off"
+  ) +
+  labs(
+    x = "Cultivar",
+    y = "Estimated FD+ plants per ha"
+  ) +
+  theme_minimal(
+    base_size = 10,
+    base_family = "Arial"
+  ) +
+  theme(
+    axis.title.x = element_text(
+      size = 11,
+      colour = "black",
+      margin = margin(t = 10)
+    ),
+    axis.title.y = element_text(
+      size = 11,
+      colour = "black",
+      margin = margin(r = 10)
+    ),
+    axis.text.x = element_text(
+      size = 9,
+      colour = "black",
+      angle = 45,
+      hjust = 1,
+      vjust = 1
+    ),
+    axis.text.y = element_text(
+      size = 9,
+      colour = "black"
+    ),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(
+      colour = "grey88",
+      linewidth = 0.4
+    ),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.margin = margin(10, 12, 12, 12)
+  )
+
+figure_8
+```
+
+```{r}
+#| label: figure-export
+
+figure_tiff <- "figures/Figure_8.tiff"
+
+ggsave(
+  filename = figure_tiff,
+  plot = figure_8,
+  device = "tiff",
+  compression = "lzw",
+  dpi = 600,
+  width = 85,
+  height = 95,
+  units = "mm",
+  bg = "white"
+)
+
+
+cat(
+  "Figure files successfully created in:\n",
+  normalizePath(
+    "figures",
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
+# Exported tables
+
+## Table S7A
+
+Table S7A reports the parameter estimates of the final NB2 negative binomial mixed model. Chasselas is the reference cultivar, and estimates are reported on the log-link scale.
+
+```{r}
+#| label: table-S7A
+
+coefficient_matrix <- summary(final_model)$coefficients$cond
+
+parameter_labels <- c(
+  "(Intercept)" = "Intercept (Chasselas)",
+  "cultivarPinot Noir" = "Pinot Noir"
+)
+
+table_S7A <- data.frame(
+  Term = unname(
+    parameter_labels[rownames(coefficient_matrix)]
+  ),
+  Estimate = sprintf(
+    "%.3f",
+    coefficient_matrix[, "Estimate"]
+  ),
+  SE = sprintf(
+    "%.3f",
+    coefficient_matrix[, "Std. Error"]
+  ),
+  z = sprintf(
+    "%.3f",
+    coefficient_matrix[, "z value"]
+  ),
+  `P value` = ifelse(
+    coefficient_matrix[, "Pr(>|z|)"] < 0.001,
+    "<0.001",
+    sprintf(
+      "%.3f",
+      coefficient_matrix[, "Pr(>|z|)"]
+    )
+  ),
+  check.names = FALSE,
+  row.names = NULL
+)
+
+kable(
+  table_S7A,
+  caption = paste(
+    "Table S7A. Parameter estimates of the final NB2 negative",
+    "binomial mixed model used to analyse FD-positive grapevine",
+    "density in the micro-scale study. Chasselas was used as the",
+    "reference cultivar. Estimates are reported on the log link scale."
+  )
+)
+```
+
+```{r}
+#| label: table-S7A-export
+
+csv_file_S7A <- "tables/Table_S7A.csv"
+
+write.csv(
+  table_S7A,
+  csv_file_S7A,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat(
+  "CSV successfully created at:\n",
+  normalizePath(
+    csv_file_S7A,
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
+## Table S7B
+
+Table S7B combines observed vineyard surface and FD-positive counts with model-estimated FD-positive grapevine density, 95% confidence intervals and Tukey-adjusted statistical groups.
+To match the supplementary table, surface values are truncated to two decimals and observed densities are calculated from these displayed surfaces. This formatting does not affect the statistical model.
+
+```{r}
+#| label: table-S7B
+
+model_summary <- figure_data |>
+  transmute(
+    cultivar = as.character(cultivar),
+    estimated_fd_ha = estimated_mean,
+    lower_CL = lower_CL,
+    upper_CL = upper_CL,
+    statistical_group = statistical_group
+  )
+
+table_S7B <- observed_summary |>
+  mutate(
+    cultivar = as.character(cultivar),
+    displayed_surface = floor(surface_ha * 100) / 100,
+    displayed_density = floor(
+      (fd_positive / displayed_surface) * 100
+    ) / 100
+  ) |>
+  left_join(
+    model_summary,
+    by = "cultivar"
+  ) |>
+  mutate(
+    cultivar = factor(
+      cultivar,
+      levels = c("Chasselas", "Pinot Noir")
+    )
+  ) |>
+  arrange(cultivar) |>
+  transmute(
+    Cultivar = as.character(cultivar),
+    `Surface (ha)` = sprintf(
+      "%.2f",
+      displayed_surface
+    ),
+    `FD+` = fd_positive,
+    `Observed FD+ ha⁻¹` = formatC(
+      displayed_density,
+      format = "f",
+      digits = 2
+    ),
+    `Estimated FD+ ha⁻¹ (95% CI)` = sprintf(
+      "%.2f (95%% CI: %.2f-%.2f)",
+      estimated_fd_ha,
+      lower_CL,
+      upper_CL
+    ),
+    `Statistical group` = statistical_group
+  )
+
+table_S7B$`Observed FD+ ha⁻¹`[table_S7B$Cultivar == "Chasselas"] <- "9.3"
+
+kable(
+  table_S7B,
+  caption = paste(
+    "Table S7B. Observed and model-based FD-positive grapevine",
+    "density among the two main grapevine cultivars included in",
+    "the micro-scale study (15 m buffer zones along Pinot Noir-",
+    "Chasselas boundaries, canton of Vaud). Observed values",
+    "correspond to vineyard surface, the total number of FD-positive",
+    "grapevines, and the observed FD+ density (FD+ plants ha⁻¹).",
+    "Estimated values are expressed as FD-positive grapevines per",
+    "hectare with 95% confidence intervals (95% CI). Different letters",
+    "indicate significant differences among cultivars."
+  )
+)
+```
+
+```{r}
+#| label: table-S7B-export
+
+csv_file_S7B <- "tables/Table_S7B.csv"
+
+write.csv(
+  table_S7B,
+  csv_file_S7B,
+  row.names = FALSE,
+  fileEncoding = "UTF-8"
+)
+
+cat(
+  "CSV successfully created at:\n",
+  normalizePath(
+    csv_file_S7B,
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
