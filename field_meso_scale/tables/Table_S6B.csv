@@ -1,0 +1,6 @@
+"Cultivar","At-risk surface (ha)","FD+","Observed FD+ ha-1","Estimated FD+ ha-1 (95% CI)","Statistical group"
+"Chasselas",528,493,0.93,"1.14 (95% CI: 0.91-1.44)","a"
+"Merlot",13,12,0.94,"1.25 (95% CI: 0.44-3.53)","a"
+"Gamay",31,291,9.39,"12.08 (95% CI: 6.60-22.14)","b"
+"Gamaret",17,402,23.2,"17.04 (95% CI: 8.09-35.90)","b"
+"Pinot Noir",75,1739,23.14,"23.66 (95% CI: 15.47-36.20)","b"
