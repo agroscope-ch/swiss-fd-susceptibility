@@ -1,0 +1,8 @@
+"Cultivar","Mortality probability (%) (95% CI)","Delta probability vs Merlot (percentage points)","Dunnett-adjusted p-value vs Merlot"
+"Merlot","75.5 (58.6-87.1)","-","-"
+"Pinot Noir","40.0 (28.5-52.8)","-35.5","0.017"
+"Chasselas","56.8 (43.8-69.0)","-18.7","0.384"
+"Gamay","43.7 (30.5-57.9)","-31.8","0.034"
+"Gamaret","57.3 (42.4-71.0)","-18.2","0.385"
+"Chardonnay","41.4 (27.0-57.4)","-34.1","0.018"
+"Cabernet Sauvignon","35.7 (24.2-49.0)","-39.9","0.003"
