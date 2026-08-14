@@ -1,0 +1,316 @@
+---
+title: "Distribution of FD phytoplasma infection within grapevine plants"
+author: "Jasmine Cadena"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: source
+---
+
+# Analysis overview
+
+This document reproduces the descriptive analysis of FD phytoplasma detection in different leaf positions of infected grapevine plants following controlled transmission experiments. The analysis summarises the proportion of sampled leaf positions that tested positive within each cultivar.
+
+
+
+# Software and packages
+
+```{r}
+#| label: setup
+
+if (getRversion() < "4.5.2") {
+  warning(
+    "This analysis was developed using R 4.5.2. Results should be checked when using an older R version."
+  )
+}
+
+required_packages <- c(
+  "dplyr",
+  "ggplot2",
+  "scales",
+  "knitr"
+)
+
+missing_packages <- required_packages[
+  !vapply(
+    required_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    paste0(
+      "The following R packages are required but not installed: ",
+      paste(missing_packages, collapse = ", "),
+      ". Install them with install.packages() before rendering this document."
+    )
+  )
+}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(knitr)
+
+dir.create("figures", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+```
+
+# Data import and preparation
+
+## Data import
+
+The public dataset contains one row per recorded leaf position. 
+
+```{r}
+#| label: data-import
+
+plant_distribution <- read.csv2(
+  "https://zenodo.org/records/21885421/files/plant_distribution.csv?download=1",
+  stringsAsFactors = FALSE
+)
+
+str(plant_distribution)
+```
+
+
+## Data preparation
+
+The public dataset is already restricted to inoculated plants that tested positive at the whole-plant level. The preparation step standardises factor order and converts cultivar codes into the names displayed in the figure.
+
+```{r}
+#| label: data-preparation
+
+analysis_data <- plant_distribution |>
+  mutate(
+    cultivar = factor(
+      cultivar,
+      levels = c("ME", "PN", "CH", "GY", "GM", "CR", "CS")
+    ),
+    cultivar_name = recode(
+      cultivar,
+      "CH" = "Chasselas",
+      "PN" = "Pinot Noir",
+      "ME" = "Merlot",
+      "CR" = "Chardonnay",
+      "GM" = "Gamaret",
+      "GY" = "Gamay",
+      "CS" = "Cabernet Sauvignon"
+    ),
+    cultivar_name = factor(
+      cultivar_name,
+      levels = c(
+        "Merlot",
+        "Pinot Noir",
+        "Chasselas",
+        "Gamay",
+        "Gamaret",
+        "Chardonnay",
+        "Cabernet Sauvignon"
+      )
+    ),
+    part = factor(
+      part,
+      levels = c("BL", "IL", "PUL", "DUL"),
+      labels = c(
+        "Basal leaf",
+        "Inoculated leaf",
+        "Proximal upper leaf",
+        "Distal upper leaf"
+      )
+    )
+  )
+
+str(analysis_data)
+```
+
+# Descriptive statistics
+
+The percentage of infected observations was calculated as the number of infected observations divided by the total number of observations available for each cultivar × leaf-part combination.
+
+```{r}
+#| label: descriptive-summary
+
+plant_distribution_summary <- analysis_data |>
+  group_by(cultivar, cultivar_name, part) |>
+  summarise(
+    infected_leaf_positions = sum(leaf_status == "infected"),
+    sampled_leaf_positions = n(),
+    infected_proportion =
+      infected_leaf_positions / sampled_leaf_positions,
+    .groups = "drop"
+  ) |>
+  mutate(
+    infected_sampled = paste0(
+      infected_leaf_positions,
+      "/",
+      sampled_leaf_positions
+    )
+  )
+
+knitr::kable(
+  plant_distribution_summary |>
+    dplyr::select(
+      cultivar_name,
+      part,
+      infected_leaf_positions,
+      sampled_leaf_positions,
+      infected_proportion
+    ),
+  digits = 3,
+  col.names = c(
+    "Cultivar",
+    "Leaf position",
+    "Infected",
+    "Sampled",
+    "Proportion infected"
+  )
+)
+```
+
+# Figure
+
+Bars show the observed proportion of infected leaf positions among all sampled leaf positions for each cultivar. Labels above bars report the number of infected observations over the total number sampled.
+
+```{r}
+#| label: plant-distribution-figure
+#| fig-cap: "Distribution of FD phytoplasma detection among leaf positions of infected grapevine plants. Bars represent the proportion of sampled leaf positions that tested positive for FD phytoplasma. Numbers above bars indicate the number of infected observations over the total number sampled."
+#| fig-width: 7.01
+#| fig-height: 5.91
+
+cultivar_colours <- c(
+  "Merlot" = "#B0C4DE",
+  "Pinot Noir" = "#DF8ADB",
+  "Chasselas" = "#E4D00A",
+  "Gamay" = "#F8766D",
+  "Gamaret" = "#5B9BD5",
+  "Chardonnay" = "#A6D854",
+  "Cabernet Sauvignon" = "#F4A32C"
+)
+
+plant_distribution_figure <- ggplot(
+  plant_distribution_summary,
+  aes(
+    x = cultivar_name,
+    y = infected_proportion,
+    fill = cultivar_name
+  )
+) +
+  geom_col(
+    colour = "black",
+    alpha = 0.8,
+    width = 0.7
+  ) +
+  geom_text(
+    aes(label = infected_sampled),
+    vjust = -0.35,
+    size = 3.8
+  ) +
+  facet_wrap(
+    ~ part,
+    ncol = 2
+  ) +
+  scale_fill_manual(
+    values = cultivar_colours,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1.08),
+    breaks = seq(0, 1, by = 0.2),
+    labels = percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  labs(
+    x = "Cultivar",
+    y = "Proportion of infected leaves"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    text = element_text(family = "Arial"),
+    panel.border = element_rect(
+      colour = "grey30",
+      fill = NA,
+      linewidth = 0.8
+    ),
+    strip.background = element_rect(
+      fill = "white",
+      colour = "grey30",
+      linewidth = 0.8
+    ),
+    axis.text.x = element_text(
+      size = 9,
+      angle = 45,
+      hjust = 1,
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 9,
+      colour = "black"
+    ),
+    axis.title.x = element_text(
+      size = 11,
+      colour = "black"
+    ),
+    axis.title.y = element_text(
+      size = 11,
+      colour = "black"
+    ),
+    strip.text = element_text(
+      size = 11,
+      face = "bold"
+    ),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(
+      colour = "grey85",
+      linewidth = 0.3
+    ),
+    panel.background = element_rect(
+      fill = "white",
+      colour = NA
+    ),
+    plot.background = element_rect(
+      fill = "white",
+      colour = NA
+    )
+  )
+
+plant_distribution_figure
+
+tiff_file <- "figures/Figure 4.tif"
+
+ggsave(
+  filename = tiff_file,
+  plot = plant_distribution_figure,
+  device = "tiff",
+  width = 178,
+  height = 150,
+  units = "mm",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+
+cat(
+  "TIFF successfully created at:\n",
+  normalizePath(
+    tiff_file,
+    winslash = "\\",
+    mustWork = TRUE
+  )
+)
+```
+
